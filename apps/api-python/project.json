@@ -7,14 +7,14 @@
     "serve": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+        "command": ".venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 8000",
         "cwd": "apps/api-python"
       }
     },
     "test": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "/usr/local/opt/python@3.13/bin/python3.13 -m pytest tests/ -v",
+        "command": ".venv/bin/python -m pytest tests/ -v",
         "cwd": "apps/api-python"
       }
     },
