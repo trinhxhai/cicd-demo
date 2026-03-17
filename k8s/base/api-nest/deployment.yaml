@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-nest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-nest
+  template:
+    metadata:
+      labels:
+        app: api-nest
+    spec:
+      containers:
+        - name: api-nest
+          image: api-nest:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: EXPRESS_URL
+              value: "http://api-express.default.svc.cluster.local:3001"
+            - name: PORT
+              value: "3000"
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

@@ -1,0 +1,34 @@
+# Strips /api/<service> prefix before forwarding to each backend.
+# e.g. GET /api/nest/ping → GET /ping on api-nest:3000
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/nest(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api-nest
+                port:
+                  number: 3000
+          - path: /api/express(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api-express
+                port:
+                  number: 3001
+          - path: /api/python(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api-python
+                port:
+                  number: 8000
