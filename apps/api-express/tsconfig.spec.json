@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "types": ["jest", "node"],
+    "rootDir": "src",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "isolatedModules": false,
+    "composite": false,
+    "emitDeclarationOnly": false,
+    "noEmitOnError": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.spec.ts"]
+}
