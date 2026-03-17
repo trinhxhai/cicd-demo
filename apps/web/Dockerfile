@@ -9,7 +9,7 @@ COPY tsconfig*.json ./
 COPY apps/web apps/web
 
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npx nx build web --prod
+RUN npx nx sync && npx nx build web --prod
 
 # Stage 2: Run
 FROM node:22-alpine AS runner

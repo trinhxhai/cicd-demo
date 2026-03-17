@@ -8,7 +8,7 @@ RUN npm ci
 COPY tsconfig*.json ./
 COPY apps/api-nest apps/api-nest
 
-RUN npx nx build api-nest --prod
+RUN npx nx sync && npx nx build api-nest --prod
 
 # Stage 2: Run
 FROM node:22-alpine AS runner
