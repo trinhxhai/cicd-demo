@@ -5,7 +5,11 @@ export default async function Home() {
 
   try {
     const res = await fetch(`${baseUrl}/api/ping`, { cache: 'no-store' });
-    chain = await res.json();
+    if (!res.ok) {
+      error = `Backend returned ${res.status}`;
+    } else {
+      chain = await res.json();
+    }
   } catch (e) {
     error = 'Could not reach backend chain.';
   }
