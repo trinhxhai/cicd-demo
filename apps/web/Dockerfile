@@ -19,12 +19,12 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY --from=builder /app/apps/web/.next/standalone ./
-COPY --from=builder /app/apps/web/.next/static ./app/apps/web/.next/static
-COPY --from=builder /app/apps/web/public ./app/apps/web/public
+COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder /app/apps/web/public ./apps/web/public
 
 RUN addgroup -g 1001 nodejs && adduser -D -u 1001 -G nodejs nodejs
 USER nodejs
 
 EXPOSE 4000
 ENV PORT=4000
-CMD ["node", "app/apps/web/server.js"]
+CMD ["node", "apps/web/server.js"]
