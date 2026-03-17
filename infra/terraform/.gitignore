@@ -1,0 +1,10 @@
+# Local state — commit only if you have no S3 backend
+terraform.tfstate
+terraform.tfstate.backup
+
+# Real vars file (contains github_repo — harmless but a good habit)
+terraform.tfvars
+
+# Terraform downloaded provider binaries (do NOT gitignore .terraform.lock.hcl — that file pins
+# provider versions and MUST be committed so terraform init is reproducible across machines)
+.terraform/
