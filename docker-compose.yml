@@ -1,0 +1,75 @@
+services:
+  api-python:
+    build:
+      context: .
+      dockerfile: apps/api-python/Dockerfile
+    ports:
+      - "8000:8000"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api-express:
+    build:
+      context: .
+      dockerfile: apps/api-express/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - PYTHON_URL=${PYTHON_URL:-http://api-python:8000}
+      - PORT=3001
+    networks:
+      - app-network
+    depends_on:
+      api-python:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/ping', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  api-nest:
+    build:
+      context: .
+      dockerfile: apps/api-nest/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - EXPRESS_URL=${EXPRESS_URL:-http://api-express:3001}
+    networks:
+      - app-network
+    depends_on:
+      api-express:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/ping', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      - NEST_URL=${NEST_URL:-http://api-nest:3000}
+      - NEXT_PUBLIC_BASE_URL=http://localhost:4000
+    networks:
+      - app-network
+    depends_on:
+      api-nest:
+        condition: service_healthy
+
+networks:
+  app-network:
+    driver: bridge
