@@ -104,11 +104,14 @@
       },
       "docker-build": {
         "executor": "nx:run-commands",
+        "cache": false,
         "options": {
           "command": "docker build -t api-express:latest apps/api-express"
         }
       }
     }
   },
-  "dependencies": {}
+  "dependencies": {
+    "express": "^5.2.1"
+  }
 }

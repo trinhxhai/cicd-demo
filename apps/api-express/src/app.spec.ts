@@ -16,6 +16,7 @@ describe('GET /ping', () => {
 
   afterEach(() => {
     jest.resetAllMocks();
+    delete process.env.PYTHON_URL;
   });
 
   it('returns express service info with python downstream', async () => {
@@ -31,5 +32,13 @@ describe('GET /ping', () => {
     await request(app).get('/ping');
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(global.fetch).toHaveBeenCalledWith('http://fake-python:8000/ping');
+  });
+
+  it('returns 502 when downstream is unreachable', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    const res = await request(app).get('/ping');
+    expect(res.status).toBe(502);
+    expect(res.body.service).toBe('express');
+    expect(res.body.status).toBe('error');
   });
 });
