@@ -1,0 +1,28 @@
+{
+  "name": "@org/web",
+  "version": "0.0.1",
+  "private": true,
+  "nx": {
+    "targets": {
+      "test": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "npx jest --config apps/web/jest.config.js",
+          "cwd": "."
+        }
+      },
+      "docker-build": {
+        "executor": "nx:run-commands",
+        "cache": false,
+        "options": {
+          "command": "docker build -t web:latest apps/web"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "next": "~16.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
