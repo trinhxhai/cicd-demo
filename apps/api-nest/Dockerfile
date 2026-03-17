@@ -17,5 +17,8 @@ WORKDIR /app
 COPY --from=builder /app/dist/apps/api-nest ./
 RUN npm ci --omit=dev --ignore-scripts
 
+RUN addgroup -g 1001 nodejs && adduser -D -u 1001 -G nodejs nodejs
+USER nodejs
+
 EXPOSE 3000
 CMD ["node", "main.js"]

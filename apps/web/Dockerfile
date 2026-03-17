@@ -22,6 +22,9 @@ COPY --from=builder /app/dist/apps/web/.next/standalone ./
 COPY --from=builder /app/dist/apps/web/.next/static ./.next/static
 COPY --from=builder /app/dist/apps/web/public ./public
 
+RUN addgroup -g 1001 nodejs && adduser -D -u 1001 -G nodejs nodejs
+USER nodejs
+
 EXPOSE 4000
 ENV PORT=4000
 CMD ["node", "server.js"]
