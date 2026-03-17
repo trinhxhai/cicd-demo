@@ -39,5 +39,12 @@ describe('AppController', () => {
       await controller.ping();
       expect(service.ping).toHaveBeenCalledTimes(1);
     });
+
+    it('returns 502 when downstream throws', async () => {
+      (service.ping as jest.Mock).mockRejectedValueOnce(new Error('downstream unavailable'));
+      await expect(controller.ping()).rejects.toMatchObject({
+        status: 502,
+      });
+    });
   });
 });
