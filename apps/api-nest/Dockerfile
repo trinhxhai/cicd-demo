@@ -14,8 +14,7 @@ RUN npx nx sync && npx nx build api-nest --prod
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-COPY --from=builder /app/dist/apps/api-nest ./
-RUN npm ci --omit=dev --ignore-scripts
+COPY --from=builder /app/apps/api-nest/dist ./
 
 RUN addgroup -g 1001 nodejs && adduser -D -u 1001 -G nodejs nodejs
 USER nodejs

@@ -14,8 +14,7 @@ RUN npx nx sync && npx nx build api-express --prod
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-COPY --from=builder /app/dist/apps/api-express ./
-RUN npm ci --omit=dev --ignore-scripts
+COPY --from=builder /app/apps/api-express/dist ./
 
 RUN addgroup -g 1001 nodejs && adduser -D -u 1001 -G nodejs nodejs
 USER nodejs
