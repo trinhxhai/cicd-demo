@@ -5,12 +5,16 @@
   "scripts": {},
   "private": true,
   "devDependencies": {
+    "@nestjs/schematics": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
     "@nx/esbuild": "22.5.4",
     "@nx/jest": "^22.5.4",
     "@nx/js": "22.5.4",
     "@nx/nest": "^22.5.4",
     "@nx/next": "^22.5.4",
     "@nx/node": "^22.5.4",
+    "@nx/web": "22.5.4",
+    "@nx/webpack": "22.5.4",
     "@swc-node/register": "1.11.1",
     "@swc/core": "1.15.8",
     "@swc/helpers": "0.5.18",
@@ -25,11 +29,20 @@
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.6",
     "tslib": "^2.3.0",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "webpack-cli": "^5.1.4"
   },
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
-  "dependencies": {}
+  "dependencies": {
+    "@nestjs/axios": "^4.0.1",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "axios": "^1.13.6",
+    "reflect-metadata": "^0.1.13",
+    "rxjs": "^7.8.0"
+  }
 }

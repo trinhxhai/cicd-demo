@@ -5,6 +5,12 @@
   "references": [
     {
       "path": "./apps/api-express"
+    },
+    {
+      "path": "./apps/api-nest-e2e"
+    },
+    {
+      "path": "./apps/api-nest"
     }
   ]
 }
