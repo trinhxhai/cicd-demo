@@ -11,13 +11,13 @@ resources:
 images:
 - name: api-express
   newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-express
-  newTag: 3724a19513caa4b4dfb097fc1f66046997ec0394
+  newTag: 2c69b734bd7f558c138dd8364d730dd2ecca8962
 - name: api-nest
   newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-nest
-  newTag: 97f509e
+  newTag: 2c69b734bd7f558c138dd8364d730dd2ecca8962
 - name: api-python
   newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
-  newTag: 97f509e
+  newTag: 2c69b734bd7f558c138dd8364d730dd2ecca8962
 - name: web
   newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/web
-  newTag: 97f509e
+  newTag: 2c69b734bd7f558c138dd8364d730dd2ecca8962
