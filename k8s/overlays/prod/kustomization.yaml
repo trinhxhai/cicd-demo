@@ -2,22 +2,22 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - ../../base
+- ../../base
 
 # IMPORTANT: Do not apply this overlay manually before CI has run.
 # The image names below are placeholders. CI patches them to full ECR URIs:
 #   kustomize edit set image api-nest=<ECR_REGISTRY>/api-nest:<SHA>
 # Applying before CI runs will cause ImagePullBackOff (images don't exist on Docker Hub).
 images:
-  - name: api-python
-    newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
-    newTag: 97f509e
-  - name: api-express
-    newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-express
-    newTag: 97f509e
-  - name: api-nest
-    newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-nest
-    newTag: 97f509e
-  - name: web
-    newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/web
-    newTag: 97f509e
+- name: api-express
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-express
+  newTag: 3724a19513caa4b4dfb097fc1f66046997ec0394
+- name: api-nest
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-nest
+  newTag: 97f509e
+- name: api-python
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
+  newTag: 97f509e
+- name: web
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/web
+  newTag: 97f509e
