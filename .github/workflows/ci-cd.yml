@@ -107,7 +107,7 @@ jobs:
           SERVICES=("api-python" "api-express" "api-nest" "web")
           if [ "${{ inputs.force_all }}" = "true" ]; then
             echo "Force-all enabled — rebuilding all services"
-            AFFECTED="${SERVICES[*]}"
+            AFFECTED=$(printf '%s\n' "${SERVICES[@]}")
           else
             AFFECTED=$(npx nx show projects --affected --base=$BASE_SHA --head=HEAD)
             echo "Affected projects since $BASE_SHA: $AFFECTED"
