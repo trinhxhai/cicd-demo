@@ -7,7 +7,7 @@ app.get('/ping', async (_req: Request, res: Response) => {
   const pythonUrl = process.env.PYTHON_URL ?? 'http://localhost:8000';
   try {
     const downstream = await fetch(`${pythonUrl}/ping`).then((r) => r.json());
-    res.json({ service: 'express', status: 'ok', downstream });
+    res.json({ service: 'express', status: 'ok', message: 'message from express', downstream });
   } catch {
     res.status(502).json({ service: 'express', status: 'error', error: 'downstream unavailable' });
   }
