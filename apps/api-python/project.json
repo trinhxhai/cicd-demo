@@ -14,7 +14,7 @@
     "test": {
       "executor": "nx:run-commands",
       "options": {
-        "command": ".venv/bin/python -m pytest tests/ -v",
+        "command": "python -m pytest tests/ -v",
         "cwd": "apps/api-python"
       }
     },
