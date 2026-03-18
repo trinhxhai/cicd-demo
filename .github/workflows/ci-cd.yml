@@ -89,13 +89,17 @@ jobs:
             --limit=1 \
             --json headSha \
             -q '.[0].headSha' 2>/dev/null || echo "")
-          if [ -n "$LAST_SUCCESS" ]; then
+          if [ -n "$LAST_SUCCESS" ] && git cat-file -t "$LAST_SUCCESS" &>/dev/null; then
             echo "base=$LAST_SUCCESS" >> $GITHUB_OUTPUT
             echo "Base SHA from last successful deploy: $LAST_SUCCESS"
           else
             FALLBACK=$(git rev-parse origin/main~1 2>/dev/null || echo "HEAD")
             echo "base=$FALLBACK" >> $GITHUB_OUTPUT
-            echo "No previous successful deploy found, falling back to: $FALLBACK"
+            if [ -n "$LAST_SUCCESS" ]; then
+              echo "SHA $LAST_SUCCESS not found in repo (force-push?), falling back to: $FALLBACK"
+            else
+              echo "No previous successful deploy found, falling back to: $FALLBACK"
+            fi
           fi
 
       - name: Build, push, and patch affected Docker images
