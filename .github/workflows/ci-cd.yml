@@ -102,14 +102,19 @@ jobs:
             fi
           fi
 
-      - name: Build, push, and patch affected Docker images
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Build, push, scan, and patch affected Docker images
         env:
           ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
           IMAGE_TAG: ${{ github.sha }}
           BASE_SHA: ${{ steps.base-sha.outputs.base }}
+          FORCE_ALL: ${{ inputs.force_all }}
         run: |
           SERVICES=("api-python" "api-express" "api-nest" "web")
-          if [ "${{ inputs.force_all }}" = "true" ]; then
+          if [ "$FORCE_ALL" = "true" ]; then
             echo "Force-all enabled — rebuilding all services"
             AFFECTED=$(printf '%s\n' "${SERVICES[@]}")
           else
@@ -123,6 +128,8 @@ jobs:
               cd $GITHUB_WORKSPACE
               docker build -t "$ECR_REGISTRY/$svc:$IMAGE_TAG" -f "apps/$svc/Dockerfile" .
               docker push "$ECR_REGISTRY/$svc:$IMAGE_TAG"
+              echo "Scanning $svc for vulnerabilities..."
+              trivy image --exit-code 1 --severity CRITICAL "$ECR_REGISTRY/$svc:$IMAGE_TAG"
               cd k8s/overlays/prod
               kustomize edit set image "$svc=$ECR_REGISTRY/$svc:$IMAGE_TAG"
             else

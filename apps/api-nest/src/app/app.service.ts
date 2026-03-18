@@ -11,7 +11,8 @@ export class AppService {
     try {
       const { data } = await firstValueFrom(this.http.get(`${expressUrl}/ping`));
       return data;
-    } catch {
+    } catch (err) {
+      console.error('[api-nest] downstream call failed:', err);
       throw new Error('downstream unavailable');
     }
   }
