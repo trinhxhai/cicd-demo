@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: 'Force rebuild and deploy all services (skip affected check)'
+        type: boolean
+        default: false
 
 jobs:
   ci:
@@ -33,7 +39,7 @@ jobs:
 
   deploy:
     needs: ci
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC
@@ -99,8 +105,13 @@ jobs:
           BASE_SHA: ${{ steps.base-sha.outputs.base }}
         run: |
           SERVICES=("api-python" "api-express" "api-nest" "web")
-          AFFECTED=$(npx nx show projects --affected --base=$BASE_SHA --head=HEAD)
-          echo "Affected projects since $BASE_SHA: $AFFECTED"
+          if [ "${{ inputs.force_all }}" = "true" ]; then
+            echo "Force-all enabled — rebuilding all services"
+            AFFECTED="${SERVICES[*]}"
+          else
+            AFFECTED=$(npx nx show projects --affected --base=$BASE_SHA --head=HEAD)
+            echo "Affected projects since $BASE_SHA: $AFFECTED"
+          fi
           cd k8s/overlays/prod
           for svc in "${SERVICES[@]}"; do
             if echo "$AFFECTED" | grep -qE "(^|/)${svc}$"; then
