@@ -57,9 +57,10 @@ jobs:
         run: |
           SERVICES=("api-python" "api-express" "api-nest" "web")
           BASE=$(git rev-parse --verify origin/main~1 2>/dev/null || echo "HEAD")
+          AFFECTED=$(npx nx show projects --affected --base=$BASE --head=HEAD)
           cd k8s/overlays/prod
           for svc in "${SERVICES[@]}"; do
-            if npx nx show projects --affected --base=$BASE --head=HEAD | grep -q "^${svc}$"; then
+            if echo "$AFFECTED" | grep -qE "(^|/)${svc}$"; then
               echo "Building and pushing $svc..."
               cd $GITHUB_WORKSPACE
               docker build -t "$ECR_REGISTRY/$svc:$IMAGE_TAG" -f "apps/$svc/Dockerfile" .
