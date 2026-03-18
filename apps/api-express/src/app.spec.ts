@@ -31,7 +31,7 @@ describe('GET /ping', () => {
     process.env.PYTHON_URL = 'http://fake-python:8000';
     await request(app).get('/ping');
     expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(global.fetch).toHaveBeenCalledWith('http://fake-python:8000/ping');
+    expect(global.fetch).toHaveBeenCalledWith('http://fake-python:8000/ping', expect.objectContaining({ signal: expect.anything() }));
   });
 
   it('returns 502 when downstream is unreachable', async () => {
