@@ -38,6 +38,7 @@ jobs:
     permissions:
       id-token: write   # required for OIDC
       contents: write   # required to push updated overlay tags
+      actions: read     # required to query last successful deploy run
       # NOTE: if your repo has branch protection requiring PRs, the git push below will fail.
       # Fix: go to Settings -> Branches -> add "github-actions[bot]" as a bypass actor,
       # OR store image tags somewhere outside branch protection (e.g. a separate unprotected branch).
@@ -68,14 +69,38 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Resolve affected base SHA
+        id: base-sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Use the last successful deploy run's SHA as base so that services
+          # changed in failed runs are not skipped on the next push.
+          LAST_SUCCESS=$(gh run list \
+            --workflow=ci-cd.yml \
+            --branch=main \
+            --status=success \
+            --limit=1 \
+            --json headSha \
+            -q '.[0].headSha' 2>/dev/null || echo "")
+          if [ -n "$LAST_SUCCESS" ]; then
+            echo "base=$LAST_SUCCESS" >> $GITHUB_OUTPUT
+            echo "Base SHA from last successful deploy: $LAST_SUCCESS"
+          else
+            FALLBACK=$(git rev-parse origin/main~1 2>/dev/null || echo "HEAD")
+            echo "base=$FALLBACK" >> $GITHUB_OUTPUT
+            echo "No previous successful deploy found, falling back to: $FALLBACK"
+          fi
+
       - name: Build, push, and patch affected Docker images
         env:
           ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
           IMAGE_TAG: ${{ github.sha }}
+          BASE_SHA: ${{ steps.base-sha.outputs.base }}
         run: |
           SERVICES=("api-python" "api-express" "api-nest" "web")
-          BASE=$(git rev-parse --verify origin/main~1 2>/dev/null || echo "HEAD")
-          AFFECTED=$(npx nx show projects --affected --base=$BASE --head=HEAD)
+          AFFECTED=$(npx nx show projects --affected --base=$BASE_SHA --head=HEAD)
+          echo "Affected projects since $BASE_SHA: $AFFECTED"
           cd k8s/overlays/prod
           for svc in "${SERVICES[@]}"; do
             if echo "$AFFECTED" | grep -qE "(^|/)${svc}$"; then
