@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-19
 **Status:** Brainstorm / Plan
-**Scope:** Dev + Prod environment separation, branch strategy, secrets, CI/CD routing
+**Scope:** Dev + Prod environment separation via separate EKS clusters, branch strategy, secrets, CI/CD routing
 
 ---
 
@@ -11,7 +11,7 @@
 | What exists today | Gap |
 |---|---|
 | One Kustomize overlay: `k8s/overlays/prod/` | No `dev` overlay |
-| CI deploys to prod on every push to `main` | No staging/dev deployment target |
+| CI deploys to prod on every push to `main` | No dev cluster or dev deployment target |
 | `.env.example` with K8s DNS URLs | No per-environment env var management |
 | GitHub Actions OIDC auth | Single IAM role, no env-scoped permissions |
 | Trivy scan gates on CRITICAL only | Same threshold for dev and prod |
@@ -37,8 +37,8 @@ hotfix/*      ─── branch from main, PR to main + cherry-pick to develop
 
 | Branch | Who merges | Protection rules | Triggers CI/CD |
 |---|---|---|---|
-| `main` | Squash merge from `develop` only | Required review + status checks | Deploy → **prod** EKS namespace |
-| `develop` | Squash merge from `feature/*` | Required status checks | Deploy → **dev** EKS namespace |
+| `main` | Squash merge from `develop` only | Required review + status checks | Deploy → **prod** EKS cluster |
+| `develop` | Squash merge from `feature/*` | Required status checks | Deploy → **dev** EKS cluster |
 | `feature/*` | Author | None | Run lint/test/build only |
 | `hotfix/*` | Author | Required review | Deploy → prod on merge to main |
 
@@ -68,9 +68,9 @@ if (process.env.FEATURE_NEW_ECHO === 'true') {
 
 ## 3. Environment Separation
 
-### 3.1 Kubernetes Namespaces
+### 3.1 Separate EKS Clusters
 
-Create two namespaces instead of deploying everything to `default`:
+Two dedicated EKS clusters — one per environment. Dev workloads never share a node, control plane, or API server with prod.
 
 ```
 k8s/
@@ -79,14 +79,23 @@ k8s/
     prod/         ← already exists
 ```
 
-| Attribute | dev | prod |
+| Attribute | dev cluster | prod cluster |
 |---|---|---|
-| K8s namespace | `dev` | `prod` |
+| EKS cluster name | `cicd-demo-dev` | `cicd-demo-prod` |
+| K8s namespace | `default` (or `app`) | `default` (or `app`) |
+| Node group | 1× t3.medium | 2× t3.medium (auto-scaled) |
 | Replicas | 1 | 2 (HPA-managed) |
 | CPU request/limit | 50m / 200m | 100m / 500m |
 | Memory request/limit | 64Mi / 128Mi | 128Mi / 256Mi |
 | Image tag strategy | `:dev-<sha7>` | `:prod-<sha7>` |
 | Ingress hostname | `dev.internal` or node port | `app.yourdomain.com` |
+| Approx. cost | ~$73/mo | ~$73/mo |
+
+**Why separate clusters over namespaces:**
+- Full control-plane isolation — a misconfigured dev webhook cannot crash prod
+- No shared node resources — dev workloads cannot starve prod pods
+- Cluster-scoped resources (CRDs, admission webhooks, PersistentVolumes) are truly isolated
+- Meets SOC2/PCI-DSS/HIPAA environment separation requirements without extra networking policy
 
 ### 3.2 `k8s/overlays/dev/kustomization.yaml` (new file)
 
@@ -94,7 +103,8 @@ k8s/
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: dev
+# No namespace field — the dev cluster uses 'default' (or 'app').
+# Cluster selection is done by CI via kubeconfig, not by a namespace override.
 
 resources:
   - ../../base
@@ -146,21 +156,21 @@ images:
 **Local (docker-compose):**
 Uses container hostnames — already working via `.env.example`.
 
-**Dev (EKS `dev` namespace):**
+**Dev (`cicd-demo-dev` cluster):**
 ```
-EXPRESS_URL=http://api-express.dev.svc.cluster.local:3001
-PYTHON_URL=http://api-python.dev.svc.cluster.local:8000
-NEST_URL=http://api-nest.dev.svc.cluster.local:3000
-```
-
-**Prod (EKS `prod` namespace):**
-```
-EXPRESS_URL=http://api-express.prod.svc.cluster.local:3001
-PYTHON_URL=http://api-python.prod.svc.cluster.local:8000
-NEST_URL=http://api-nest.prod.svc.cluster.local:3000
+EXPRESS_URL=http://api-express.default.svc.cluster.local:3001
+PYTHON_URL=http://api-python.default.svc.cluster.local:8000
+NEST_URL=http://api-nest.default.svc.cluster.local:3000
 ```
 
-These are injected via Kustomize `configMapGenerator` or deployment env patches — not stored in application code.
+**Prod (`cicd-demo-prod` cluster):**
+```
+EXPRESS_URL=http://api-express.default.svc.cluster.local:3001
+PYTHON_URL=http://api-python.default.svc.cluster.local:8000
+NEST_URL=http://api-nest.default.svc.cluster.local:3000
+```
+
+The URLs are identical across clusters — services always talk to each other within the same cluster via the K8s DNS shortname. This means the `configMapGenerator` values in the Kustomize overlay are the same for dev and prod. The environment difference is entirely in which cluster kubeconfig CI uses, not in the manifest content.
 
 ---
 
@@ -206,6 +216,8 @@ Never commit `.env`, `.env.dev`, or `.env.prod` — use Secrets Manager for thos
 
 ### 5.1 Workflow Routing by Branch
 
+Each deploy job authenticates to a different EKS cluster using cluster-specific IAM roles. The kubeconfig is generated at runtime by `aws eks update-kubeconfig`.
+
 ```yaml
 # .github/workflows/ci-cd.yml additions
 
@@ -222,18 +234,49 @@ jobs:
   deploy-dev:
     if: github.ref == 'refs/heads/develop'
     needs: ci
-    # kubectl apply k8s/overlays/dev
-    # image tag: dev-<sha7>
-    # namespace: dev
+    environment: development          # GitHub Environment, no approval gate
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEV_IAM_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: |
+          aws eks update-kubeconfig --name cicd-demo-dev --region us-east-1
+          SHA7=$(echo $GITHUB_SHA | cut -c1-7)
+          cd k8s/overlays/dev
+          kustomize edit set image \
+            api-nest=<ECR>/api-nest:dev-${SHA7} \
+            api-express=<ECR>/api-express:dev-${SHA7} \
+            api-python=<ECR>/api-python:dev-${SHA7} \
+            web=<ECR>/web:dev-${SHA7}
+          kubectl apply -k .
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
     needs: ci
-    # kubectl apply k8s/overlays/prod
-    # image tag: prod-<sha7>
-    # namespace: prod
-    # Require manual approval via GitHub Environment protection rule
+    environment: production           # GitHub Environment — requires manual approval
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PROD_IAM_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: |
+          aws eks update-kubeconfig --name cicd-demo-prod --region us-east-1
+          SHA7=$(echo $GITHUB_SHA | cut -c1-7)
+          cd k8s/overlays/prod
+          kustomize edit set image \
+            api-nest=<ECR>/api-nest:prod-${SHA7} \
+            # ... etc
+          kubectl apply -k .
 ```
+
+> The `DEV_IAM_ROLE_ARN` and `PROD_IAM_ROLE_ARN` are stored as GitHub **Environment** secrets (not repo secrets) so only the corresponding job can assume each role. The dev role has no EKS permissions for `cicd-demo-prod` and vice versa.
 
 ### 5.2 Image Tagging Convention
 
@@ -291,19 +334,22 @@ For `development` environment: no approval gate, deploys automatically on merge 
 ### 5.6 Separate IAM Roles per Environment
 
 ```
-GitHubActions-Dev-Role   → ECR push, EKS access to `dev` namespace only
-GitHubActions-Prod-Role  → ECR push, EKS access to `prod` namespace only
+GitHubActions-Dev-Role   → ECR push, eks:DescribeCluster on cicd-demo-dev only
+GitHubActions-Prod-Role  → ECR push, eks:DescribeCluster on cicd-demo-prod only
 ```
 
-Scope K8s RBAC using a namespace-scoped `Role` (not `ClusterRole`) bound with a `RoleBinding` so the CI identity for dev has zero visibility into the `prod` namespace:
+The IAM trust policy for each role restricts which GitHub Actions job can assume it (scoped to the `development` or `production` GitHub Environment). The prod role has zero IAM permissions on the dev cluster and vice versa.
+
+Within each cluster, scope K8s RBAC using a `Role` (not `ClusterRole`) for least-privilege:
 
 ```yaml
 # k8s/overlays/dev/ci-rbac.yaml
+# Apply this to cicd-demo-dev cluster only
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role                  # namespace-scoped — NOT ClusterRole
+kind: Role
 metadata:
   name: ci-deployer
-  namespace: dev
+  namespace: default
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -313,17 +359,17 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ci-deployer-binding
-  namespace: dev
+  namespace: default
 subjects:
   - kind: User
-    name: <github-actions-iam-role-arn>
+    name: <GitHubActions-Dev-Role-ARN>
 roleRef:
-  kind: Role                # must match Role above
+  kind: Role
   name: ci-deployer
   apiGroup: rbac.authorization.k8s.io
 ```
 
-> **`ClusterRole` vs `Role`:** A `ClusterRole` with a `RoleBinding` technically scopes access to one namespace at runtime, but the `ClusterRole` object itself is cluster-global and can be re-bound by any cluster admin. A `Role` object only exists within its namespace — stronger isolation and easier to audit.
+> With separate clusters, the isolation is already at the infrastructure level — the dev IAM role physically cannot call the prod cluster API. The `Role` (vs `ClusterRole`) is still best practice for least-privilege within a cluster, but it's defense-in-depth rather than the primary isolation mechanism.
 
 ---
 
@@ -387,18 +433,19 @@ git push
 - [ ] Update `on.push.branches` in `ci-cd.yml` to include `develop`
 
 ### Phase B — Kubernetes Dev Overlay (Day 1–2)
-- [ ] Create `k8s/overlays/dev/kustomization.yaml`
-- [ ] Create `dev` namespace in EKS (`kubectl create namespace dev`)
-- [ ] Add namespace-scoped RBAC for CI dev role
-- [ ] Test: `kubectl apply -k k8s/overlays/dev` locally
+- [ ] Provision `cicd-demo-dev` EKS cluster (via Terraform or eksctl)
+- [ ] Create `k8s/overlays/dev/kustomization.yaml` (no namespace override)
+- [ ] Add `Role` + `RoleBinding` RBAC for CI dev role in `k8s/overlays/dev/ci-rbac.yaml`
+- [ ] Test: `aws eks update-kubeconfig --name cicd-demo-dev` + `kubectl apply -k k8s/overlays/dev`
 
 ### Phase C — CI/CD Routing (Day 2–3)
 - [ ] Add `deploy-dev` job gated on `github.ref == 'refs/heads/develop'`
 - [ ] Add `deploy-prod` job gated on `github.ref == 'refs/heads/main'`
 - [ ] Create `production` GitHub Environment with approval gate
 - [ ] Create `development` GitHub Environment (no gate)
-- [ ] Separate IAM roles for dev/prod in `infra/terraform/iam.tf`
-- [ ] Store role ARNs as GitHub Environment secrets (not repo secrets)
+- [ ] Separate IAM roles for dev/prod in `infra/terraform/iam.tf` (each scoped to one EKS cluster ARN)
+- [ ] Store `DEV_IAM_ROLE_ARN` in `development` GitHub Environment secrets
+- [ ] Store `PROD_IAM_ROLE_ARN` in `production` GitHub Environment secrets
 
 ### Phase D — Secrets Management (Day 3–5)
 - [ ] Create AWS Secrets Manager paths `/dev/*` and `/prod/*`
@@ -408,9 +455,10 @@ git push
 
 ### Phase E — Dev Environment Validation (Day 5)
 - [ ] Merge a test feature branch to `develop`
-- [ ] Verify dev deploy triggers correctly
-- [ ] Verify prod deploy does NOT trigger
-- [ ] Verify images tagged correctly in ECR
+- [ ] Verify dev deploy triggers correctly and targets `cicd-demo-dev`
+- [ ] Verify prod deploy does NOT trigger on `develop` push
+- [ ] Verify images tagged correctly in ECR (`dev-<sha7>` vs `prod-<sha7>`)
+- [ ] Verify dev role cannot call `cicd-demo-prod` API (expect 403/AccessDenied)
 - [ ] Run smoke test: `curl http://dev.internal/api/nest/ping`
 
 ---
@@ -420,24 +468,11 @@ git push
 | Decision | Chosen | Alternative | Why not |
 |---|---|---|---|
 | Branch model | Trunk + `develop` | Full GitFlow | GitFlow release branches add overhead without benefit at this scale |
-| Environment namespaces | K8s namespaces (demo/learning only — see warning below) | Separate EKS clusters | Separate clusters cost ~$73/mo each; namespaces sufficient for this project scale |
+| Environment isolation | Separate EKS clusters | K8s namespaces on one cluster | Namespaces share control plane + nodes; clusters provide true blast-radius isolation |
 | Secrets | AWS Secrets Manager + ESO | Sealed Secrets | ASM integrates with existing AWS setup; ESO is well-maintained |
 | Image tagging | `env-<sha7>` prefix | Separate ECR repos per env | Single repo simpler; tag prefix gives clear traceability |
 | Prod gate | GitHub Environment approval | Manual workflow trigger | Environment protection is auditable and integrates with GitHub UI |
 | IAM scoping | Separate roles per env | Single role | Least-privilege: dev CI cannot accidentally modify prod |
-
-### ⚠️ Single-Cluster Warning
-
-Sharing one EKS cluster for dev and prod via namespaces is acceptable for demos and learning. Do **not** use this pattern for workloads that handle real user data or fall under compliance requirements.
-
-| Risk | Detail |
-|---|---|
-| **Blast radius** | A memory-leaking pod in `dev` can exhaust node memory shared with `prod` pods |
-| **Control plane is shared** | A misconfigured `dev` webhook or CRD can crash the `kube-apiserver` for all namespaces |
-| **Cluster-scoped resources** | CRDs, ClusterRoles, PersistentVolumes, and Admission Webhooks cannot be namespace-isolated |
-| **Compliance** | SOC2, PCI-DSS, and HIPAA require environment isolation at the infrastructure level, not just namespace |
-
-**Graduate to separate clusters when:** handling PII, financial data, or any regulated workload; or when the team has more than 2–3 engineers actively deploying.
 
 ---
 
