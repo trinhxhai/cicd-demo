@@ -18,17 +18,19 @@
 
 ---
 
-## 2. Recommended Git Branch Strategy: Trunk-Based with Long-Lived `develop`
+## 2. Recommended Git Branch Strategy: Two-Branch Model (`main` + `develop`)
+
+> **Not** trunk-based development. Trunk-based means committing directly to `main` with feature flags — no `develop` branch. What we use here is **GitHub Flow with a staging branch**: two long-lived branches, short-lived feature branches, and feature flags to decouple deploy from release.
 
 ### Branch Model
 
 ```
 main          ─── protected, always deployable, maps to PROD
   │
-develop       ─── integration branch, maps to DEV/staging
+develop       ─── integration branch, maps to DEV
   │
 feature/*     ─── short-lived, open PRs against develop
-hotfix/*      ─── branch from main, PR to main + back-merge to develop
+hotfix/*      ─── branch from main, PR to main + cherry-pick to develop
 ```
 
 ### Rules
@@ -40,12 +42,27 @@ hotfix/*      ─── branch from main, PR to main + back-merge to develop
 | `feature/*` | Author | None | Run lint/test/build only |
 | `hotfix/*` | Author | Required review | Deploy → prod on merge to main |
 
-### Why trunk-based over GitFlow?
+### Why this over GitFlow?
 
 - NX `nx affected` already does incremental builds — no need for long release branches
 - Short-lived feature branches (1–3 days) keep diffs small and conflicts minimal
 - A single `develop` integration branch gives a stable dev environment to test against
 - Avoids GitFlow's `release/` branch overhead — promote directly `develop → main`
+
+### Feature Flags — the essential companion
+
+Short-lived branches only work if incomplete features can be merged without breaking the app. Use environment-variable feature flags to deploy code in a disabled state:
+
+```typescript
+// api-nest: feature hidden behind flag
+if (process.env.FEATURE_NEW_ECHO === 'true') {
+  // new behaviour
+}
+```
+
+- Flag is `false` on `develop` and `main` until the feature is ready
+- Enables merging to `develop` daily even for multi-day work
+- Prevents `develop` from becoming an "integration hell" dumping ground where half-finished features from multiple developers collide for the first time
 
 ---
 
@@ -91,21 +108,38 @@ patches:
     target:
       kind: Deployment
 
-# Image tags injected by CI (dev-<sha7>)
+# Image tags: CI replaces "dev-placeholder" via `kustomize edit set image`
+# NEVER manually set dev-latest here — mutable tags break rollbacks and
+# may not trigger a new pull if imagePullPolicy is IfNotPresent.
 images:
   - name: api-nest
     newName: <ECR_REGISTRY>/api-nest
-    newTag: dev-latest
+    newTag: dev-placeholder
   - name: api-express
     newName: <ECR_REGISTRY>/api-express
-    newTag: dev-latest
+    newTag: dev-placeholder
   - name: api-python
     newName: <ECR_REGISTRY>/api-python
-    newTag: dev-latest
+    newTag: dev-placeholder
   - name: web
     newName: <ECR_REGISTRY>/web
-    newTag: dev-latest
+    newTag: dev-placeholder
 ```
+
+> **CI must replace `dev-placeholder` with the real SHA tag.** The deploy-dev job in GitHub Actions must run the following before `kubectl apply`:
+>
+> ```bash
+> SHA7=$(echo $GITHUB_SHA | cut -c1-7)
+> cd k8s/overlays/dev
+> kustomize edit set image \
+>   api-nest=<ECR_REGISTRY>/api-nest:dev-${SHA7} \
+>   api-express=<ECR_REGISTRY>/api-express:dev-${SHA7} \
+>   api-python=<ECR_REGISTRY>/api-python:dev-${SHA7} \
+>   web=<ECR_REGISTRY>/web:dev-${SHA7}
+> kubectl apply -k .
+> ```
+>
+> This mirrors exactly how the existing `prod` deploy works in `ci-cd.yml` (via `kustomize edit set image`). The placeholder in git is intentional — it documents the shape of the tag without committing a real SHA.
 
 ### 3.3 Service Discovery URLs per Environment
 
@@ -210,7 +244,41 @@ jobs:
 
 Both tags pushed to the same ECR repository per service. This allows tracing any running image back to its exact commit.
 
-### 5.3 GitHub Environment Protection (for prod)
+### 5.3 Rollback Strategy
+
+Every deploy job must include a post-deploy validation step. If the smoke test fails, the job rolls back automatically and fails the workflow:
+
+```yaml
+- name: Wait for rollout
+  run: |
+    for svc in api-nest api-express api-python web; do
+      kubectl rollout status deployment/$svc -n $NAMESPACE --timeout=3m
+    done
+
+- name: Smoke test
+  id: smoke
+  run: |
+    # Replace with actual ingress URL per environment
+    curl --retry 5 --retry-delay 5 --fail \
+      http://${INGRESS_HOST}/api/nest/ping | jq '.status == "ok"'
+
+- name: Rollback on failure
+  if: failure() && steps.smoke.conclusion == 'failure'
+  run: |
+    for svc in api-nest api-express api-python web; do
+      kubectl rollout undo deployment/$svc -n $NAMESPACE
+    done
+    echo "Rolled back all deployments in $NAMESPACE"
+    exit 1
+```
+
+Key points:
+- `kubectl rollout status` already exists in `ci-cd.yml` — add the smoke test and rollback steps after it
+- `kubectl rollout undo` reverts to the previous ReplicaSet — fast, no image rebuild needed
+- K8s retains the last 10 ReplicaSets by default (`revisionHistoryLimit`), giving 10 rollback points
+- For prod, consider also opening a GitHub Issue or Slack alert on auto-rollback
+
+### 5.5 GitHub Environment Protection (for prod)
 
 In GitHub repo settings → Environments:
 - Create `production` environment
@@ -220,14 +288,42 @@ In GitHub repo settings → Environments:
 
 For `development` environment: no approval gate, deploys automatically on merge to `develop`.
 
-### 5.4 Separate IAM Roles per Environment
+### 5.6 Separate IAM Roles per Environment
 
 ```
 GitHubActions-Dev-Role   → ECR push, EKS access to `dev` namespace only
 GitHubActions-Prod-Role  → ECR push, EKS access to `prod` namespace only
 ```
 
-Scope K8s RBAC with a `ClusterRole`/`RoleBinding` per namespace so the CI role for dev cannot touch prod resources.
+Scope K8s RBAC using a namespace-scoped `Role` (not `ClusterRole`) bound with a `RoleBinding` so the CI identity for dev has zero visibility into the `prod` namespace:
+
+```yaml
+# k8s/overlays/dev/ci-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role                  # namespace-scoped — NOT ClusterRole
+metadata:
+  name: ci-deployer
+  namespace: dev
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer-binding
+  namespace: dev
+subjects:
+  - kind: User
+    name: <github-actions-iam-role-arn>
+roleRef:
+  kind: Role                # must match Role above
+  name: ci-deployer
+  apiGroup: rbac.authorization.k8s.io
+```
+
+> **`ClusterRole` vs `Role`:** A `ClusterRole` with a `RoleBinding` technically scopes access to one namespace at runtime, but the `ClusterRole` object itself is cluster-global and can be re-bound by any cluster admin. A `Role` object only exists within its namespace — stronger isolation and easier to audit.
 
 ---
 
@@ -271,11 +367,14 @@ git push -u origin hotfix/critical-bug
 # 3. PR → main (fast review, small diff)
 # On merge: deploy to prod
 
-# 4. Back-merge to develop immediately
-git checkout develop
-git merge --no-ff main
+# 4. Cherry-pick the fix onto develop (NOT git merge main → develop)
+git checkout develop && git pull
+git cherry-pick <hotfix-commit-sha>
 git push
 ```
+
+> **Why cherry-pick, not back-merge?**
+> After squash-merging `develop → main`, the commits on `main` have no shared ancestry with `develop`. Merging `main` back into `develop` causes Git to treat every prod commit as new, resulting in duplicate commit entries in `git log`, spurious merge conflicts over time, and broken `git bisect`. Cherry-pick applies only the specific fix without re-introducing ancestry divergence.
 
 ---
 
@@ -321,11 +420,24 @@ git push
 | Decision | Chosen | Alternative | Why not |
 |---|---|---|---|
 | Branch model | Trunk + `develop` | Full GitFlow | GitFlow release branches add overhead without benefit at this scale |
-| Environment namespaces | K8s namespaces | Separate EKS clusters | Separate clusters cost ~$73/mo each; namespaces are free and sufficient |
+| Environment namespaces | K8s namespaces (demo/learning only — see warning below) | Separate EKS clusters | Separate clusters cost ~$73/mo each; namespaces sufficient for this project scale |
 | Secrets | AWS Secrets Manager + ESO | Sealed Secrets | ASM integrates with existing AWS setup; ESO is well-maintained |
 | Image tagging | `env-<sha7>` prefix | Separate ECR repos per env | Single repo simpler; tag prefix gives clear traceability |
 | Prod gate | GitHub Environment approval | Manual workflow trigger | Environment protection is auditable and integrates with GitHub UI |
 | IAM scoping | Separate roles per env | Single role | Least-privilege: dev CI cannot accidentally modify prod |
+
+### ⚠️ Single-Cluster Warning
+
+Sharing one EKS cluster for dev and prod via namespaces is acceptable for demos and learning. Do **not** use this pattern for workloads that handle real user data or fall under compliance requirements.
+
+| Risk | Detail |
+|---|---|
+| **Blast radius** | A memory-leaking pod in `dev` can exhaust node memory shared with `prod` pods |
+| **Control plane is shared** | A misconfigured `dev` webhook or CRD can crash the `kube-apiserver` for all namespaces |
+| **Cluster-scoped resources** | CRDs, ClusterRoles, PersistentVolumes, and Admission Webhooks cannot be namespace-isolated |
+| **Compliance** | SOC2, PCI-DSS, and HIPAA require environment isolation at the infrastructure level, not just namespace |
+
+**Graduate to separate clusters when:** handling PII, financial data, or any regulated workload; or when the team has more than 2–3 engineers actively deploying.
 
 ---
 
