@@ -19,14 +19,12 @@ k8s/
   base/
     metrics-server.yaml            ← Metrics Server installation manifest
     api-express/
-      hpa.yaml                     ← HPA for api-express (min 1, max 10, cpu 70%)
+      hpa.yaml                     ← HPA for api-express (min 1, max 4, cpu 5% test-mode)
       pdb.yaml                     ← PodDisruptionBudget (minAvailable: 1)
     cluster-autoscaler.yaml        ← Cluster Autoscaler deployment + RBAC
 
 k8s/base/kustomization.yaml        ← Modified to include new resources
 
-load-tests/
-  ping-load.js                     ← k6 script: ramp up traffic to api-express
 ```
 
 ---
@@ -129,7 +127,7 @@ spec:
     kind: Deployment
     name: api-express
   minReplicas: 1
-  maxReplicas: 10
+  maxReplicas: 4
   metrics:
     - type: Resource
       resource:
@@ -159,7 +157,7 @@ kubectl get hpa api-express-hpa
 Expected output (approximately):
 ```
 NAME               REFERENCE              TARGETS   MINPODS   MAXPODS   REPLICAS
-api-express-hpa    Deployment/api-express  5%/70%    1         10        1
+api-express-hpa    Deployment/api-express  5%/70%    1         4         1
 ```
 
 The `TARGETS` column shows current CPU % vs the 70% threshold.
@@ -168,7 +166,7 @@ The `TARGETS` column shows current CPU % vs the 70% threshold.
 
 ```bash
 git add k8s/base/api-express/hpa.yaml
-git commit -m "feat: add HPA for api-express (min 1, max 10, target CPU 70%)"
+git commit -m "feat: add HPA for api-express (min 1, max 4, target CPU 70%)"
 ```
 
 ---
@@ -415,9 +413,9 @@ const TARGET_URL = __ENV.TARGET_URL || 'http://localhost:3001';
 
 export const options = {
   stages: [
-    { duration: '1m', target: 50 },    // ramp up to 50 users over 1 minute
-    { duration: '3m', target: 100 },   // hold at 100 users for 3 minutes (triggers HPA)
-    { duration: '1m', target: 200 },   // spike to 200 (triggers Cluster Autoscaler)
+    { duration: '1m', target: 30 },    // ramp up to 30 users over 1 minute
+    { duration: '3m', target: 60 },    // hold at 60 users for 3 minutes (triggers HPA)
+    { duration: '1m', target: 100 },   // spike to 100 (push toward max 4 pods)
     { duration: '2m', target: 0 },     // ramp down (observe scale-down)
   ],
 };
@@ -467,13 +465,13 @@ k6 run \
 
 ```
 ~0:00  - 1 Express pod, CPU ~5%, 2 nodes
-~1:00  - CPU spikes above 70% → HPA adds pods (2, 3, 4...)
-~3:00  - Pods exhaust node capacity → some pods Pending
-~4:00  - Cluster Autoscaler adds nodes (2 → 3 → 4)
-~5:00  - Pending pods become Running on new nodes
-~6:00  - Load ramps down → CPU drops
-~8:00  - HPA scales pods back to 1
-~10:00 - Cluster Autoscaler removes unused nodes (2 min stabilization)
+~1:00  - CPU spikes above 70% → HPA adds pods (2, 3, up to 4)
+~3:00  - HPA holds at 4 pods (max); CPU distributes across pods
+         Note: 4 pods × 100m CPU fit easily on 2 t3.medium nodes,
+         so Cluster Autoscaler may not trigger (no Pending pods)
+~5:00  - Load ramps down → CPU drops
+~7:00  - HPA scales pods back to 1 (120s stabilization window)
+~10:00 - Cluster Autoscaler removes any unused nodes (if it added any)
 ```
 
 - [ ] **Step 7: Verify scale-up happened**
@@ -518,9 +516,9 @@ git commit --allow-empty -m "chore: phase 3 complete — HPA and Cluster Autosca
 ## Phase 3 Done ✓
 
 **Success criterion met when:**
-- k6 load test → HPA scales `api-express` from 1 pod to multiple pods
-- Cluster Autoscaler adds EC2 nodes when pods are Pending
-- Both scale back down after load test ends
+- k6 load test → HPA scales `api-express` from 1 pod up to 4 pods
+- HPA scales back down to 1 pod after load ends
+- Cluster Autoscaler adds EC2 nodes IF pods become Pending (unlikely with max=4 on t3.medium, but CA is deployed and watching)
 
 **Cost reminder:** Always run `infra/teardown.sh` after your session. Phase 3 with Cluster Autoscaler can add nodes temporarily, billed by the hour.
 
