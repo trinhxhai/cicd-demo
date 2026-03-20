@@ -8,7 +8,7 @@ RUN npm ci
 COPY tsconfig*.json ./
 COPY apps/api-express apps/api-express
 
-RUN npx nx sync && npx nx run @org/api-express:prune
+RUN (npx nx sync || true) && npx nx run @org/api-express:prune
 
 # Stage 2: Run
 FROM node:22-alpine AS runner
