@@ -387,128 +387,105 @@ git commit -m "feat: add Cluster Autoscaler, HPA, and PDB for phase 3 autoscalin
 
 ---
 
-## Task 5: k6 Load Test + Observe Autoscaling
+## Task 5: Trigger and Observe Autoscaling
 
-Trigger both HPA and Cluster Autoscaler with a real load test and watch the scaling happen live.
+No external tools needed. All commands run against the cluster directly.
 
-- [ ] **Step 1: Install k6**
+### Part A: HPA scale-up and scale-down
 
-```bash
-# macOS
-brew install k6
-
-# Or download from https://k6.io/docs/get-started/installation/
-```
-
-- [ ] **Step 2: Create the load test script**
-
-Create `load-tests/ping-load.js`:
-
-```javascript
-import http from 'k6/http';
-import { sleep, check } from 'k6';
-
-// Target the api-express service directly via NLB ingress
-const TARGET_URL = __ENV.TARGET_URL || 'http://localhost:3001';
-
-export const options = {
-  stages: [
-    { duration: '1m', target: 30 },    // ramp up to 30 users over 1 minute
-    { duration: '3m', target: 60 },    // hold at 60 users for 3 minutes (triggers HPA)
-    { duration: '1m', target: 100 },   // spike to 100 (push toward max 4 pods)
-    { duration: '2m', target: 0 },     // ramp down (observe scale-down)
-  ],
-};
-
-export default function () {
-  const res = http.get(`${TARGET_URL}/ping`);
-  check(res, {
-    'status is 200': (r) => r.status === 200,
-    'has service field': (r) => JSON.parse(r.body).service === 'express',
-  });
-  sleep(0.1);
-}
-```
-
-- [ ] **Step 3: Get the NLB address**
+- [ ] **Step 1: Open a watch window in a separate terminal**
 
 ```bash
-NLB_ADDRESS=$(kubectl get ingress app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-echo "NLB: $NLB_ADDRESS"
+# Install watch if missing (macOS): brew install watch
+watch -n 3 "kubectl get hpa api-express-hpa && echo && kubectl get pods -l app=api-express && echo && kubectl get nodes"
 ```
 
-- [ ] **Step 4: Open a watch window for pods and HPA**
+Or without `watch`:
+```bash
+while true; do clear; kubectl get hpa api-express-hpa && echo && kubectl get pods -l app=api-express && echo && kubectl get nodes; sleep 3; done
+```
 
-In a separate terminal, run:
+This updates every 3 seconds and shows HPA targets, pod count, and node count live.
+
+- [ ] **Step 2: Trigger HPA scale-up**
+
+In your main terminal, run a busybox pod inside the cluster that hammers `/ping` in a tight loop:
 
 ```bash
-# Watch HPA and pods update in real time
-watch -n 5 "kubectl get hpa api-express-hpa && echo '' && kubectl get pods -l app=api-express && echo '' && kubectl get nodes"
+kubectl run load-gen \
+  --image=busybox --restart=Never \
+  -- sh -c "while true; do wget -q -O- http://api-express.default.svc.cluster.local:3001/ping; sleep 0.01; done"
 ```
 
-This shows:
-- HPA: current CPU% vs 70% threshold, current replica count
-- Pods: how many Express pods are running
-- Nodes: how many EC2 nodes are in the cluster
+- [ ] **Step 3: Observe HPA scale-up**
 
-- [ ] **Step 5: Run the load test**
+Watch the watch window. Within ~30 seconds:
+- `TARGETS` column on HPA climbs above 5%
+- `REPLICAS` increases from 1 → 2 → up to 4
 
-In your main terminal:
+Expected HPA output during load:
+```
+NAME               REFERENCE              TARGETS    MINPODS   MAXPODS   REPLICAS
+api-express-hpa    Deployment/api-express  45%/5%    1         4         4
+```
+
+- [ ] **Step 4: Trigger HPA scale-down**
 
 ```bash
-k6 run \
-  -e TARGET_URL=http://$NLB_ADDRESS/api/express \
-  load-tests/ping-load.js
+kubectl delete pod load-gen
 ```
 
-- [ ] **Step 6: Observe what happens (expected sequence)**
+CPU drops to 0%. After the 120s stabilization window, HPA scales back to 1 pod.
 
-```
-~0:00  - 1 Express pod, CPU ~5%, 2 nodes
-~1:00  - CPU spikes above 70% → HPA adds pods (2, 3, up to 4)
-~3:00  - HPA holds at 4 pods (max); CPU distributes across pods
-         Note: 4 pods × 100m CPU fit easily on 2 t3.medium nodes,
-         so Cluster Autoscaler may not trigger (no Pending pods)
-~5:00  - Load ramps down → CPU drops
-~7:00  - HPA scales pods back to 1 (120s stabilization window)
-~10:00 - Cluster Autoscaler removes any unused nodes (if it added any)
-```
-
-- [ ] **Step 7: Verify scale-up happened**
-
-After the 100-user stage, check:
+- [ ] **Step 5: Verify scale-down**
 
 ```bash
 kubectl get hpa api-express-hpa
-# REPLICAS should be > 1
+# REPLICAS should return to 1
+```
 
+---
+
+### Part B: Cluster Autoscaler scale-up and scale-down
+
+- [ ] **Step 6: Deploy resource-hog pods to force Pending**
+
+Each pod requests 1800m CPU. A t3.medium has ~1930m allocatable — with existing system pods using ~400-600m per node, a second hog pod cannot be scheduled and goes Pending. CA sees it and adds a node.
+
+```bash
+kubectl run resource-hog-1 --image=busybox --restart=Never --requests='cpu=1800m' -- sleep 600
+kubectl run resource-hog-2 --image=busybox --restart=Never --requests='cpu=1800m' -- sleep 600
+```
+
+- [ ] **Step 7: Observe CA adding a node**
+
+```bash
+kubectl get pods -o wide | grep resource-hog
+# One pod: Running. One pod: Pending
+```
+
+```bash
 kubectl get nodes
-# Should see more than 2 nodes
+# After ~2-3 minutes, a new node appears (STATUS: Ready)
 ```
 
-- [ ] **Step 8: Verify scale-down happened**
-
-After the load test ends, wait 5 minutes then check:
+- [ ] **Step 8: Trigger CA scale-down**
 
 ```bash
-kubectl get hpa api-express-hpa
-# REPLICAS should be back to 1
+kubectl delete pod resource-hog-1 resource-hog-2
+```
 
+The new node becomes idle. CA removes it after its default ~10 minute cooldown.
+
+```bash
 kubectl get nodes
-# Should be back to 2 nodes (Cluster Autoscaler default cooldown is ~10min)
+# After ~10 minutes, node count returns to original
 ```
 
-- [ ] **Step 9: Commit the load test**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add load-tests/
-git commit -m "feat: add k6 load test for autoscaling verification"
-```
-
-- [ ] **Step 10: Final commit**
-
-```bash
-git commit --allow-empty -m "chore: phase 3 complete — HPA and Cluster Autoscaler verified with k6"
+git commit --allow-empty -m "chore: phase 3 complete — HPA and Cluster Autoscaler verified with kubectl stress pods"
 ```
 
 ---
