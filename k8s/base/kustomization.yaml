@@ -12,3 +12,6 @@ resources:
   - web/service.yaml
   - api-ingress.yaml
   - web-ingress.yaml
+  - api-express/hpa.yaml
+  - api-express/pdb.yaml
+  - cluster-autoscaler.yaml
