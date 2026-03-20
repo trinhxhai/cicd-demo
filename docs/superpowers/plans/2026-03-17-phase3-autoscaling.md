@@ -134,7 +134,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 5    # TEST MODE — change to 70 for production
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 30     # react quickly to load spikes
@@ -157,7 +157,7 @@ kubectl get hpa api-express-hpa
 Expected output (approximately):
 ```
 NAME               REFERENCE              TARGETS   MINPODS   MAXPODS   REPLICAS
-api-express-hpa    Deployment/api-express  5%/70%    1         4         1
+api-express-hpa    Deployment/api-express  0%/5%     1         4         1
 ```
 
 The `TARGETS` column shows current CPU % vs the 70% threshold.
@@ -166,7 +166,7 @@ The `TARGETS` column shows current CPU % vs the 70% threshold.
 
 ```bash
 git add k8s/base/api-express/hpa.yaml
-git commit -m "feat: add HPA for api-express (min 1, max 4, target CPU 70%)"
+git commit -m "feat: add HPA for api-express (min 1, max 4, target CPU 5% test-mode)"
 ```
 
 ---
