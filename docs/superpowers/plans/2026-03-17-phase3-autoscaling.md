@@ -6,7 +6,7 @@
 
 **Architecture:** Metrics Server feeds live CPU/memory data to HPA. HPA watches `api-express` only — it scales pods when CPU > 70%. When pods can't be scheduled (nodes full), Cluster Autoscaler adds EC2 nodes via the ASG. PodDisruptionBudget ensures at least 1 Express pod stays up during scale-down. All changes are layered on top of Phase 2 with no destructive modifications.
 
-**Tech Stack:** Kubernetes Metrics Server, HPA, Cluster Autoscaler, PodDisruptionBudget, k6
+**Tech Stack:** Kubernetes Metrics Server, HPA, Cluster Autoscaler, PodDisruptionBudget, kubectl/busybox
 
 **Prerequisite:** Phase 2 must be complete. EKS cluster must be running with all 4 services deployed.
 
@@ -493,9 +493,10 @@ git commit --allow-empty -m "chore: phase 3 complete — HPA and Cluster Autosca
 ## Phase 3 Done ✓
 
 **Success criterion met when:**
-- k6 load test → HPA scales `api-express` from 1 pod up to 4 pods
-- HPA scales back down to 1 pod after load ends
-- Cluster Autoscaler adds EC2 nodes IF pods become Pending (unlikely with max=4 on t3.medium, but CA is deployed and watching)
+- `kubectl run load-gen` → HPA scales `api-express` from 1 pod up to 4 pods within ~30 seconds
+- HPA scales back down to 1 pod after `load-gen` pod is deleted (120s stabilization window)
+- `resource-hog` pods → one goes Pending → Cluster Autoscaler adds an EC2 node within ~3 minutes
+- Node removed after `resource-hog` pods deleted (~10 min CA cooldown)
 
 **Cost reminder:** Always run `infra/teardown.sh` after your session. Phase 3 with Cluster Autoscaler can add nodes temporarily, billed by the hour.
 
