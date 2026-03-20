@@ -8,7 +8,7 @@ RUN npm ci
 COPY tsconfig*.json ./
 COPY apps/api-nest apps/api-nest
 
-RUN (npx nx sync || true) && npx nx run @org/api-nest:prune
+RUN (npx nx sync || true) && npx nx run api-nest:prune
 
 # Stage 2: Run
 FROM node:22-alpine AS runner
