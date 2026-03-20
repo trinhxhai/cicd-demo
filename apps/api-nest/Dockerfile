@@ -7,8 +7,9 @@ RUN npm ci
 
 COPY tsconfig*.json ./
 COPY apps/api-nest apps/api-nest
-COPY apps/api-express/tsconfig*.json apps/api-express/
-COPY apps/web/tsconfig*.json apps/web/
+COPY apps/api-express/package.json apps/api-express/tsconfig*.json apps/api-express/
+COPY apps/web/package.json apps/web/tsconfig*.json apps/web/
+COPY apps/api-python/package.json apps/api-python/
 
 RUN npx nx sync && npx nx run @org/api-nest:prune
 
