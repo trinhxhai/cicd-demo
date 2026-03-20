@@ -92,3 +92,79 @@ resource "aws_eks_access_policy_association" "github_actions_admin" {
     type = "cluster"
   }
 }
+
+# Cluster Autoscaler — IRSA role
+# The CA pod uses this role (via service account annotation) to call the AWS
+# Auto Scaling API: describe/set desired capacity on the node group ASG.
+data "aws_iam_policy_document" "cluster_autoscaler_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [module.eks.oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${module.eks.oidc_provider}:sub"
+      values   = ["system:serviceaccount:kube-system:cluster-autoscaler"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${module.eks.oidc_provider}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "cluster_autoscaler" {
+  name               = "cluster-autoscaler"
+  assume_role_policy = data.aws_iam_policy_document.cluster_autoscaler_assume.json
+}
+
+resource "aws_iam_policy" "cluster_autoscaler" {
+  name = "cluster-autoscaler"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:DescribeAutoScalingInstances",
+          "autoscaling:DescribeLaunchConfigurations",
+          "autoscaling:DescribeScalingActivities",
+          "autoscaling:DescribeTags",
+          "ec2:DescribeImages",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeLaunchTemplateVersions",
+          "ec2:GetInstanceTypesFromInstanceRequirements",
+          "eks:DescribeNodegroup"
+        ]
+        Resource = ["*"]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:SetDesiredCapacity",
+          "autoscaling:TerminateInstanceInAutoScalingGroup"
+        ]
+        Resource = ["*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_autoscaler" {
+  role       = aws_iam_role.cluster_autoscaler.name
+  policy_arn = aws_iam_policy.cluster_autoscaler.arn
+}
+
+output "cluster_autoscaler_role_arn" {
+  description = "IAM role ARN for the Cluster Autoscaler service account"
+  value       = aws_iam_role.cluster_autoscaler.arn
+}
