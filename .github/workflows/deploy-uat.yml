@@ -1,0 +1,129 @@
+name: Deploy UAT
+
+on:
+  push:
+    branches: [uat]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: 'Force rebuild and deploy all services (skip affected check)'
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: uat
+    permissions:
+      id-token: write   # required for OIDC
+      contents: write   # required to push updated overlay tags
+      actions: read     # required to query last successful deploy run
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.UAT_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve affected base SHA
+        id: base-sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LAST_SUCCESS=$(gh run list \
+            --workflow=deploy-uat.yml \
+            --branch=uat \
+            --status=success \
+            --limit=1 \
+            --json headSha \
+            -q '.[0].headSha' 2>/dev/null || echo "")
+          if [ -n "$LAST_SUCCESS" ] && git cat-file -t "$LAST_SUCCESS" &>/dev/null; then
+            echo "base=$LAST_SUCCESS" >> $GITHUB_OUTPUT
+            echo "Base SHA from last successful UAT deploy: $LAST_SUCCESS"
+          else
+            FALLBACK=$(git rev-parse origin/uat~1 2>/dev/null || echo "HEAD")
+            echo "base=$FALLBACK" >> $GITHUB_OUTPUT
+            echo "No previous successful UAT deploy found, falling back to: $FALLBACK"
+          fi
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Build, push, scan, and patch affected Docker images
+        env:
+          ECR_REGISTRY: ${{ secrets.UAT_ECR_REGISTRY }}
+          IMAGE_TAG: ${{ github.sha }}
+          BASE_SHA: ${{ steps.base-sha.outputs.base }}
+          FORCE_ALL: ${{ inputs.force_all }}
+        run: |
+          SERVICES=("api-python" "api-express" "api-nest" "web")
+          if [ "$FORCE_ALL" = "true" ]; then
+            echo "Force-all enabled — rebuilding all services"
+            AFFECTED=$(printf '%s\n' "${SERVICES[@]}")
+          else
+            AFFECTED=$(npx nx show projects --affected --base=$BASE_SHA --head=HEAD)
+            echo "Affected projects since $BASE_SHA: $AFFECTED"
+          fi
+          cd k8s/overlays/uat
+          for svc in "${SERVICES[@]}"; do
+            if echo "$AFFECTED" | grep -qE "(^|/)${svc}$"; then
+              echo "Building and pushing $svc..."
+              cd $GITHUB_WORKSPACE
+              docker build -t "$ECR_REGISTRY/$svc:$IMAGE_TAG" -f "apps/$svc/Dockerfile" .
+              docker push "$ECR_REGISTRY/$svc:$IMAGE_TAG"
+              echo "Scanning $svc for vulnerabilities..."
+              trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$ECR_REGISTRY/$svc:$IMAGE_TAG"
+              cd k8s/overlays/uat
+              kustomize edit set image "$svc=$ECR_REGISTRY/$svc:$IMAGE_TAG"
+            else
+              echo "Skipping $svc (not affected) — keeping existing image tag"
+            fi
+          done
+          cd $GITHUB_WORKSPACE
+          git config user.email "ci@github-actions"
+          git config user.name "GitHub Actions"
+          git add k8s/overlays/uat/kustomization.yaml
+          git diff --cached --quiet || git commit -m "ci: update UAT image tags for $IMAGE_TAG [skip ci]"
+          # Retry loop handles concurrent pushes to uat (e.g. two PRs merged close together)
+          for i in 1 2 3; do
+            git pull --rebase origin uat && git push && break
+            echo "Push attempt $i failed — retrying in 5s"
+            sleep 5
+          done
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ secrets.UAT_EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Deploy to UAT EKS
+        run: kubectl apply -k k8s/overlays/uat
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/api-python --timeout=120s
+          kubectl rollout status deployment/api-express --timeout=120s
+          kubectl rollout status deployment/api-nest --timeout=120s
+          kubectl rollout status deployment/web --timeout=120s
