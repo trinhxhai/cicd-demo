@@ -1,0 +1,78 @@
+name: Deploy Prod
+
+on:
+  push:
+    branches: [prod]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production   # pauses here until a required reviewer approves in GitHub Actions UI
+    permissions:
+      id-token: write   # required for OIDC
+      contents: write   # required to push updated overlay tags
+      actions: read
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PROD_AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install yq
+        run: |
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
+      - name: Promote UAT image tags to prod overlay
+        run: |
+          # No Docker build — read the exact image tags deployed to UAT and apply to prod.
+          # k8s/overlays/uat/kustomization.yaml was committed by deploy-uat.yml and is
+          # present on this branch because the uat→prod PR merge carried it.
+          SERVICES=("api-python" "api-express" "api-nest" "web")
+          cd k8s/overlays/prod
+          for svc in "${SERVICES[@]}"; do
+            NEW_NAME=$(yq eval ".images[] | select(.name == \"$svc\") | .newName" $GITHUB_WORKSPACE/k8s/overlays/uat/kustomization.yaml)
+            NEW_TAG=$(yq eval ".images[] | select(.name == \"$svc\") | .newTag" $GITHUB_WORKSPACE/k8s/overlays/uat/kustomization.yaml)
+            if [ -n "$NEW_TAG" ] && [ "$NEW_TAG" != "null" ]; then
+              echo "Promoting $svc -> $NEW_NAME:$NEW_TAG"
+              kustomize edit set image "$svc=$NEW_NAME:$NEW_TAG"
+            else
+              echo "No tag found for $svc in UAT overlay — skipping"
+            fi
+          done
+          cd $GITHUB_WORKSPACE
+          git config user.email "ci@github-actions"
+          git config user.name "GitHub Actions"
+          git add k8s/overlays/prod/kustomization.yaml
+          git diff --cached --quiet || git commit -m "ci: promote UAT image tags to prod [skip ci]"
+          # Retry loop handles edge case of concurrent pushes to prod
+          for i in 1 2 3; do
+            git pull --rebase origin prod && git push && break
+            echo "Push attempt $i failed — retrying in 5s"
+            sleep 5
+          done
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ secrets.PROD_EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Deploy to prod EKS
+        run: kubectl apply -k k8s/overlays/prod
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/api-python --timeout=120s
+          kubectl rollout status deployment/api-express --timeout=120s
+          kubectl rollout status deployment/api-nest --timeout=120s
+          kubectl rollout status deployment/web --timeout=120s
