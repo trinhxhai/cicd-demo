@@ -5,10 +5,6 @@ resources:
 - ../../base
 - cluster-secret-store.yaml
 - external-secret-api-nest.yaml
-- web-ingress.yaml
-
-patches:
-- path: web-service-patch.yaml
 
 # IMPORTANT: Do not apply this overlay manually before CI has run.
 # The image names below are placeholders. CI patches them to full ECR URIs:
