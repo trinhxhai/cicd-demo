@@ -14,4 +14,3 @@ resources:
   - web-ingress.yaml
   - api-express/hpa.yaml
   - api-express/pdb.yaml
-  - cluster-autoscaler.yaml
