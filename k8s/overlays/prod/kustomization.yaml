@@ -3,6 +3,8 @@ kind: Kustomization
 
 resources:
 - ../../base
+- cluster-secret-store.yaml
+- external-secret-api-nest.yaml
 
 # IMPORTANT: Do not apply this overlay manually before CI has run.
 # The image names below are placeholders. CI patches them to full ECR URIs:
