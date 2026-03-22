@@ -63,3 +63,10 @@ out
 test-output
 
 /learning-log/
+.gitnexus
+
+# Terraform — local secrets and state (never commit these)
+**/terraform.tfvars
+**/terraform.tfstate
+**/terraform.tfstate*
+**/.terraform/

@@ -1,0 +1,3 @@
+aws_region   = "us-east-1"
+cluster_name = "nx-monorepo-uat"
+github_repo  = "your-org/nx-monorepo-boilerplate"
