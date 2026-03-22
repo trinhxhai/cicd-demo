@@ -11,15 +11,15 @@ resources:
 #   kustomize edit set image api-nest=<ECR_REGISTRY>/api-nest:<SHA>
 # Applying before the pipeline runs will cause ImagePullBackOff.
 images:
-  - name: api-python
-    newName: YOUR_ECR_REGISTRY/api-python
-    newTag: latest
-  - name: api-express
-    newName: YOUR_ECR_REGISTRY/api-express
-    newTag: latest
-  - name: api-nest
-    newName: YOUR_ECR_REGISTRY/api-nest
-    newTag: latest
-  - name: web
-    newName: YOUR_ECR_REGISTRY/web
-    newTag: latest
+- name: api-express
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-express
+  newTag: 24407c494beb255bbebcc9a44fe4c50661f3c776
+- name: api-nest
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-nest
+  newTag: 24407c494beb255bbebcc9a44fe4c50661f3c776
+- name: api-python
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
+  newTag: 24407c494beb255bbebcc9a44fe4c50661f3c776
+- name: web
+  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/web
+  newTag: 24407c494beb255bbebcc9a44fe4c50661f3c776
