@@ -49,7 +49,7 @@ resource "aws_iam_policy" "github_actions_eks_describe" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["eks:DescribeCluster"]
-      Resource = module.eks.cluster_arn
+      Resource = "*"
     }]
   })
 }
