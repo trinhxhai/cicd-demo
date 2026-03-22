@@ -60,9 +60,10 @@ resource "aws_iam_role_policy_attachment" "github_actions_eks_describe" {
 }
 
 resource "aws_eks_access_entry" "github_actions" {
-  cluster_name  = module.eks.cluster_name
-  principal_arn = aws_iam_role.github_actions.arn
-  type          = "STANDARD"
+  cluster_name      = module.eks.cluster_name
+  principal_arn     = aws_iam_role.github_actions.arn
+  type              = "STANDARD"
+  kubernetes_groups = ["ci-deployers"]
 }
 
 resource "aws_eks_access_policy_association" "github_actions_admin" {
