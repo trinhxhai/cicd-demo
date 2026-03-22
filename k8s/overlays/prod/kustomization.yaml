@@ -5,6 +5,7 @@ resources:
 - ../../base
 - cluster-secret-store.yaml
 - external-secret-api-nest.yaml
+- web-ingress.yaml
 
 patches:
 - path: web-service-patch.yaml
