@@ -6,6 +6,9 @@ resources:
 - cluster-secret-store.yaml
 - external-secret-api-nest.yaml
 
+patches:
+- path: web-service-patch.yaml
+
 # IMPORTANT: Do not apply this overlay manually before CI has run.
 # The image names below are placeholders. CI patches them to full ECR URIs:
 #   kustomize edit set image api-nest=<ECR_REGISTRY>/api-nest:<SHA>
