@@ -43,6 +43,7 @@ services:
       - "3000:3000"
     environment:
       - EXPRESS_URL=${EXPRESS_URL:-http://api-express:3001}
+      - SERVICE_SECRET=${SERVICE_SECRET:-dev-secret}
     networks:
       - app-network
     depends_on:

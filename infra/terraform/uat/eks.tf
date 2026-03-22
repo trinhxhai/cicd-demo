@@ -38,3 +38,20 @@ resource "helm_release" "nginx_ingress" {
 
   depends_on = [module.eks]
 }
+
+# External Secrets Operator
+resource "helm_release" "external_secrets" {
+  name             = "external-secrets"
+  repository       = "https://charts.external-secrets.io"
+  chart            = "external-secrets"
+  namespace        = "external-secrets"
+  create_namespace = true
+  version          = "0.10.0"
+
+  set {
+    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+    value = aws_iam_role.external_secrets.arn
+  }
+
+  depends_on = [module.eks]
+}

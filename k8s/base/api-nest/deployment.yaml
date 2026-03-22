@@ -22,6 +22,11 @@ spec:
               value: "http://api-express.default.svc.cluster.local:3001"
             - name: PORT
               value: "3000"
+            - name: SERVICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: api-nest-secrets
+                  key: SERVICE_SECRET
           readinessProbe:
             httpGet:
               path: /ping

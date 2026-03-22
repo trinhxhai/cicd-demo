@@ -148,3 +148,56 @@ output "cluster_autoscaler_role_arn" {
   description = "IAM role ARN for the Cluster Autoscaler service account (UAT)"
   value       = aws_iam_role.cluster_autoscaler.arn
 }
+
+# External Secrets Operator IRSA role
+data "aws_iam_policy_document" "external_secrets_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [module.eks.oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${module.eks.oidc_provider}:sub"
+      values   = ["system:serviceaccount:external-secrets:external-secrets"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${module.eks.oidc_provider}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "external_secrets" {
+  name               = "external-secrets-uat"
+  assume_role_policy = data.aws_iam_policy_document.external_secrets_assume.json
+}
+
+resource "aws_iam_policy" "external_secrets" {
+  name = "external-secrets-uat"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+      Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:/uat/*"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "external_secrets" {
+  role       = aws_iam_role.external_secrets.name
+  policy_arn = aws_iam_policy.external_secrets.arn
+}
+
+output "external_secrets_role_arn" {
+  description = "IAM role ARN for External Secrets Operator (UAT)"
+  value       = aws_iam_role.external_secrets.arn
+}

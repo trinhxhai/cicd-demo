@@ -3,6 +3,8 @@ kind: Kustomization
 
 resources:
 - ../../base
+- cluster-secret-store.yaml
+- external-secret-api-nest.yaml
 
 # IMPORTANT: Do not apply this overlay manually before the UAT deploy pipeline has run.
 # The image names below are placeholders. The deploy-uat.yml pipeline patches them to full ECR URIs:
