@@ -13,10 +13,12 @@ terraform {
   }
 
   # Optional: uncomment to store state in S3 (recommended for teams)
+  # Each environment MUST use a different key to prevent state collisions.
   # backend "s3" {
-  #   bucket = "your-terraform-state-bucket"
-  #   key    = "nx-monorepo/terraform.tfstate"
-  #   region = "us-east-1"
+  #   bucket         = "your-terraform-state-bucket"
+  #   key            = "terraform/prod/terraform.tfstate"
+  #   region         = "us-east-1"
+  #   dynamodb_table = "terraform-locks"   # optional, prevents concurrent applies
   # }
 }
 
