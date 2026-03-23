@@ -11,9 +11,17 @@ Items marked ✅ were previously flagged and have since been fixed.
 |------|---------------|
 | CI/CD | Base SHA now reads from last successful deploy run via `gh run list` (no longer falls back blindly to `origin/main~1`) |
 | CI/CD | `workflow_dispatch` with `force_all` input added for manual full rebuilds |
+| CI/CD | Single `ci-cd.yml` replaced by three workflows: `ci.yml` (tests), `deploy-uat.yml` (build+deploy), `deploy-prod.yml` (promote+deploy) |
+| CI/CD | Image vulnerability scanning added — Trivy scans each image after push in `deploy-uat.yml` |
+| CI/CD | Least-privilege CI role — `AmazonEKSEditPolicy` scoped to `default` namespace, not cluster admin |
+| CI/CD | Separate roles per environment (`github-actions-uat`, `github-actions-prod`) |
+| CI/CD | ESO RBAC managed by Terraform (`ClusterRole` + binding for `ci-deployers` group) |
 | Kubernetes | Service-to-service URLs now use correct K8s DNS (`http://api-express.default.svc.cluster.local:3001`) |
-| Docker | Non-root user (`nodejs` / `appuser`) added to all service images |
+| Kubernetes | `HorizontalPodAutoscaler` added for `api-express` (min 1, max 4 replicas; 5% CPU in UAT, 70% in prod) |
+| Kubernetes | `PodDisruptionBudget` added for `api-express` (`minAvailable: 1`) |
 | Kubernetes | `web` deployment memory limit raised to 512Mi |
+| Secrets | External Secrets Operator (ESO) added — syncs secrets from AWS Secrets Manager; no secrets in YAML or Git |
+| Docker | Non-root user (`nodejs` / `appuser`) added to all service images |
 
 ---
 
@@ -21,35 +29,21 @@ Items marked ✅ were previously flagged and have since been fixed.
 
 ### 1. CI/CD
 
-#### Auto-push image tags to `main` (`ci-cd.yml`)
+#### Auto-push image tags to overlay branches (`deploy-uat.yml`, `deploy-prod.yml`)
 ```yaml
-git pull --rebase origin main
-git push
+git pull --rebase origin uat && git push
 ```
-CI commits updated image tags back to `main` on every deploy. If `[skip ci]` is ever missed this creates an infinite loop. It also races with developer pushes.
+CI commits updated image tags back to `uat`/`prod` on every deploy. The retry loop reduces races, and `[skip ci]` prevents infinite loops, but this pattern is still fragile under high-frequency merges.
 
-**Production pattern:** Store image tags outside the main branch — a dedicated unprotected `gitops` branch, an SSM Parameter Store value, or a Helm values file in a separate repo.
+**Production pattern:** Store image tags outside the branch — a dedicated unprotected `gitops` branch, an SSM Parameter Store value, or Flux/ArgoCD watching the overlay.
 
-#### Hardcoded AWS account ID (`k8s/overlays/prod/kustomization.yaml`)
+#### Hardcoded AWS account ID in overlays (`k8s/overlays/prod/kustomization.yaml`, `uat/kustomization.yaml`)
 ```yaml
 newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
 ```
-Account ID is sensitive and committed to version control.
+Account ID is sensitive and committed to version control. CI already uses `ECR_REGISTRY` secret — the static overlay entries are updated on each deploy but the account ID leaks in git history.
 
-**Production pattern:** Use a GitHub secret (`ECR_REGISTRY`) substituted at deploy time. CI already has this variable — the static placeholder in kustomization.yaml should never contain a real account ID.
-
-#### No image vulnerability scanning
-Docker images are built and pushed with no security scan. A compromised package ships directly to EKS.
-
-**Production pattern:** Add a Trivy or Grype step between `docker push` and `kustomize edit set image`:
-```yaml
-- name: Scan image
-  uses: aquasecurity/trivy-action@master
-  with:
-    image-ref: "${{ env.ECR_REGISTRY }}/${{ env.SVC }}:${{ env.IMAGE_TAG }}"
-    exit-code: '1'
-    severity: 'CRITICAL,HIGH'
-```
+**Production pattern:** The initial placeholder should be a non-real value (e.g. `PLACEHOLDER.dkr.ecr.region.amazonaws.com/service`), with CI always overwriting via `kustomize edit set image` before committing.
 
 ---
 
@@ -176,15 +170,18 @@ No way to know what failed or why. In production, debugging a 502 with no logs i
 
 ### 5. Missing Production Concerns
 
-| Area | What's Missing |
-|------|---------------|
+| Area | Status |
+|------|--------|
 | Observability | No Prometheus metrics, no distributed tracing, no structured logging |
 | TLS | Ingress serves plain HTTP — no cert-manager, no HTTPS |
 | Rate limiting | No ingress rate-limit annotations |
-| RBAC | Pods use the default ServiceAccount with full cluster API access |
-| Autoscaling | No `HorizontalPodAutoscaler` — traffic spikes can't be absorbed |
-| Resilience | No `PodDisruptionBudget` — cluster upgrades can kill all pods simultaneously |
-| Namespace isolation | Everything in `default` — no dev/staging/prod separation |
+| RBAC | Pods use the default ServiceAccount |
+| ✅ Autoscaling | HPA added for `api-express` (min 1, max 4; 70% CPU prod) — other services still fixed replicas |
+| ✅ Resilience | PDB added for `api-express` (`minAvailable: 1`) — other services still unprotected |
+| ✅ Secrets management | ESO syncs from AWS Secrets Manager — no hardcoded secrets in YAML |
+| ✅ Least-privilege CI | `AmazonEKSEditPolicy` scoped to `default` namespace, separate role per env |
+| ✅ Image scanning | Trivy scans every image in `deploy-uat.yml` before deploy |
+| Namespace isolation | Everything in `default` — no namespace-level separation between UAT and prod workloads (they use separate clusters instead) |
 | Dependency pinning | `^` and `~` in `package.json` allow silent minor version updates |
 | Python tests | `pytest` is installed but no tests exist for `api-python` |
 
@@ -192,4 +189,4 @@ No way to know what failed or why. In production, debugging a 502 with no logs i
 
 ## Summary
 
-The project has improved meaningfully — service discovery URLs are correct, all images run as non-root, and the CI base SHA logic is now reliable. The remaining gaps are typical of a phase-2 project: the infrastructure runs, but it's fragile under failure conditions (single replicas, no liveness probes, no graceful shutdown) and would need another hardening pass before handling real traffic.
+The project has improved significantly through phases 3 and 4: autoscaling (HPA + cluster-autoscaler), resilience (PDB), secrets management (ESO), least-privilege CI, and image scanning are all in place. The remaining gaps are observability (no metrics/tracing), TLS, rate limiting, and liveness probes. The system is now reasonable for UAT traffic but would need observability and TLS hardening before handling real production load.
