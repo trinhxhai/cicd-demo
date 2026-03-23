@@ -10,14 +10,14 @@ resources:
 # Applying before CI runs will cause ImagePullBackOff (images don't exist on Docker Hub).
 images:
 - name: api-express
-  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-express
-  newTag: 3cb85a0c8bc62b5f293e00de0d231f05b6aea604
+  newName: <ECR_REGISTRY>/api-express
+  newTag: latest
 - name: api-nest
-  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-nest
-  newTag: 3cb85a0c8bc62b5f293e00de0d231f05b6aea604
+  newName: <ECR_REGISTRY>/api-nest
+  newTag: latest
 - name: api-python
-  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
-  newTag: 3cb85a0c8bc62b5f293e00de0d231f05b6aea604
+  newName: <ECR_REGISTRY>/api-python
+  newTag: latest
 - name: web
-  newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/web
-  newTag: 3cb85a0c8bc62b5f293e00de0d231f05b6aea604
+  newName: <ECR_REGISTRY>/web
+  newTag: latest

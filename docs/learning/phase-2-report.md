@@ -32,7 +32,7 @@ CI commits updated image tags back to `main` on every deploy. If `[skip ci]` is 
 
 #### Hardcoded AWS account ID (`k8s/overlays/prod/kustomization.yaml`)
 ```yaml
-newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-python
+newName: <ECR_REGISTRY>/api-python
 ```
 Account ID is sensitive and committed to version control.
 
