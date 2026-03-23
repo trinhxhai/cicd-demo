@@ -15,7 +15,7 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 5    # TEST MODE — change to 70 for production
+          averageUtilization: 5    # Low for UAT/demo — prod overlay overrides this to 70
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 30

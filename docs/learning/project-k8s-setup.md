@@ -15,21 +15,30 @@ k8s/
     api-express/
       deployment.yaml
       service.yaml
+      hpa.yaml                   ← HorizontalPodAutoscaler (min 1, max 4 replicas)
+      pdb.yaml                   ← PodDisruptionBudget (min 1 available)
     api-nest/
       deployment.yaml
       service.yaml
     web/
       deployment.yaml
       service.yaml
-    api-ingress.yaml             ← routes external /api/* traffic
+    api-ingress.yaml             ← routes external /api/* traffic with path rewriting
     web-ingress.yaml             ← routes external /* traffic
     kustomization.yaml           ← lists all base resources
   overlays/
+    uat/
+      kustomization.yaml         ← patches image names with UAT ECR URIs + SHAs
+      cluster-secret-store.yaml  ← ESO: points to UAT AWS Secrets Manager
+      external-secret-api-nest.yaml ← ESO: pulls SERVICE_SECRET for api-nest
     prod/
-      kustomization.yaml         ← patches image names with real ECR URIs
+      kustomization.yaml         ← patches image names with Prod ECR URIs + SHAs
+      hpa-api-express.yaml       ← patches HPA CPU threshold to 70% for prod
+      cluster-secret-store.yaml  ← ESO: points to Prod AWS Secrets Manager
+      external-secret-api-nest.yaml ← ESO: pulls SERVICE_SECRET for api-nest
 ```
 
-Each service has exactly two files: a **Deployment** and a **Service**. That's it. This is the minimum needed to run a container in Kubernetes and make it reachable.
+Most services have exactly two files: a **Deployment** and a **Service**. `api-express` additionally has an HPA and PDB. The overlays add secrets management and environment-specific patches on top.
 
 ---
 
@@ -296,6 +305,141 @@ Kustomize renders the base + overlay into full Kubernetes YAML in memory, then s
 
 ---
 
+## Concept 6: HorizontalPodAutoscaler (HPA)
+
+An HPA automatically scales the number of replicas for a Deployment based on metrics.
+
+Here's `k8s/base/api-express/hpa.yaml`:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-express-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-express
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 5    # Low threshold — overridden to 70 in prod overlay
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30    # scale up quickly
+    scaleDown:
+      stabilizationWindowSeconds: 120   # scale down slowly to avoid flapping
+```
+
+The `averageUtilization: 5` is deliberately low for UAT/demo — a single request will trigger a scale-up, making it easy to see the HPA in action. The prod overlay patches this to `70` so production only scales under real load.
+
+**Requires Metrics Server** — the HPA reads CPU metrics from the Kubernetes Metrics Server, which is installed separately (via Helm by the cluster setup, not part of `kubectl apply -k`).
+
+**The prod overlay patch** (`k8s/overlays/prod/hpa-api-express.yaml`) is a strategic merge patch that only overrides the CPU threshold:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-express-hpa
+spec:
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # overrides base's 5%
+```
+
+---
+
+## Concept 7: PodDisruptionBudget (PDB)
+
+A PDB limits how many pods can be taken down simultaneously during voluntary disruptions (e.g., node drain during cluster upgrades, rolling node replacements by cluster-autoscaler).
+
+Here's `k8s/base/api-express/pdb.yaml`:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-express-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-express
+```
+
+`minAvailable: 1` means Kubernetes will never drain a node if doing so would leave fewer than 1 `api-express` pod running. This prevents full service downtime during cluster maintenance — the HPA's `minReplicas: 1` alone doesn't protect against this.
+
+---
+
+## Concept 8: External Secrets Operator (ESO)
+
+ESO bridges AWS Secrets Manager and Kubernetes Secrets. Rather than committing secrets to Git or injecting them as plain env vars, ESO syncs them from Secrets Manager into a real Kubernetes Secret that pods can reference normally.
+
+**Two resources are needed per environment:**
+
+### `cluster-secret-store.yaml` — the connection to AWS Secrets Manager
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: aws-secrets-manager
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: external-secrets-sa
+            namespace: external-secrets
+```
+
+This tells ESO how to connect: use IRSA (the `external-secrets-sa` service account has an IAM role attached) to call AWS Secrets Manager in `us-east-1`.
+
+### `external-secret-api-nest.yaml` — maps a secret from AWS to a K8s Secret
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: api-nest-secret
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  target:
+    name: api-nest-secret      # the Kubernetes Secret that gets created
+    creationPolicy: Owner
+  data:
+    - secretKey: SERVICE_SECRET
+      remoteRef:
+        key: /env/api-nest             # the path in Secrets Manager
+        property: SERVICE_SECRET       # the JSON field within that secret
+```
+
+ESO creates a Kubernetes Secret named `api-nest-secret` with a `SERVICE_SECRET` key, refreshed every hour. The `api-nest` deployment then mounts it as an env var using `valueFrom.secretKeyRef`.
+
+**Why ESO instead of plain Kubernetes Secrets?**
+- Secrets in AWS Secrets Manager are encrypted, audited, and centrally managed
+- Rotation in Secrets Manager automatically propagates to pods (within `refreshInterval`)
+- No secrets are committed to Git or embedded in YAML
+
+---
+
 ## How a Deploy Actually Changes a Running Pod
 
 When you push to `main` and CI updates an image tag, here's what Kubernetes does internally:
@@ -317,10 +461,16 @@ This is a **rolling update** — zero downtime if the new pod becomes healthy. I
 |------|------|---------|
 | `*/deployment.yaml` | Deployment | Runs the container, defines replicas/resources/health checks |
 | `*/service.yaml` | Service | Stable internal DNS name + load balances across pods |
+| `api-express/hpa.yaml` | HorizontalPodAutoscaler | Auto-scales api-express between 1–4 replicas based on CPU |
+| `api-express/pdb.yaml` | PodDisruptionBudget | Ensures at least 1 api-express pod stays up during node maintenance |
 | `api-ingress.yaml` | Ingress | Routes `/api/*` external traffic, strips prefix |
 | `web-ingress.yaml` | Ingress | Routes `/*` external traffic, no rewrite |
 | `base/kustomization.yaml` | Kustomization | Lists all base resources |
-| `overlays/prod/kustomization.yaml` | Kustomization | Patches image tags to real ECR URIs |
+| `overlays/uat/kustomization.yaml` | Kustomization | Patches image tags to UAT ECR URIs |
+| `overlays/prod/kustomization.yaml` | Kustomization | Patches image tags to Prod ECR URIs |
+| `overlays/*/cluster-secret-store.yaml` | ClusterSecretStore | ESO: connection to AWS Secrets Manager |
+| `overlays/*/external-secret-api-nest.yaml` | ExternalSecret | ESO: syncs SERVICE_SECRET from Secrets Manager |
+| `overlays/prod/hpa-api-express.yaml` | Patch | Overrides HPA CPU threshold to 70% for prod |
 
 ---
 
@@ -329,8 +479,8 @@ This is a **rolling update** — zero downtime if the new pod becomes healthy. I
 | Missing | Why it's absent |
 |---------|----------------|
 | `livenessProbe` | Only `readinessProbe` is defined — a pod that crashes gets restarted by K8s, but a deadlocked pod stays "Running" forever. Production would add a liveness probe. |
-| `replicas: 2+` | Single replica = full downtime on pod crash (~30s to reschedule). Fine for learning, not for production. |
+| `replicas: 2+` | Single base replica — HPA handles scaling from 1. At minimum load only 1 pod runs. A `minReplicas: 2` + PDB would be safer for production SLAs. |
 | `securityContext` | No `runAsNonRoot`, `readOnlyRootFilesystem`, etc. The Dockerfiles already create non-root users but K8s doesn't enforce it. |
 | `NetworkPolicy` | All pods can talk to all pods. The architecture enforces a strict chain (web → nest → express → python) but nothing in K8s prevents other paths. |
-| `HorizontalPodAutoscaler` | Fixed replica count — no auto-scaling on load. |
-| Namespace isolation | Everything runs in `default`. A real setup would have separate namespaces per environment. |
+| HPA for all services | Only `api-express` has an HPA — it's the most likely bottleneck in the chain. The others could be added following the same pattern. |
+| Namespace isolation | Everything runs in `default`. A real setup would have separate namespaces per environment or team. |

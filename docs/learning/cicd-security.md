@@ -26,18 +26,18 @@
 - How to avoid common CI auth failures during OIDC rollout.
 - How this repo currently balances convenience vs strict least-privilege in OIDC trust.
 
-### Gaps / Uncertainties
+### Current State (Updated 2026-03-23)
 
-- Environment-based `sub` pattern specifics if deployments are tied to GitHub Environments.
-- Best production policy pattern for multiple branches/tags without over-broad trust.
-- Whether additional condition keys are needed for this repo's exact branching model.
-- Whether this project should tighten trust from `repo:<owner>/<repo>:*` to main/environment-specific subjects.
+- **Separate roles per environment**: `github-actions-uat` and `github-actions-prod` — each environment only has access to its own cluster and ECR.
+- **Least-privilege permissions**: CI role no longer uses the EKS cluster admin policy. Instead it has `AmazonEKSEditPolicy` scoped to the `default` namespace only, plus ECR push/pull.
+- **ESO RBAC managed by Terraform**: A `ClusterRole` and binding are created in Terraform for the `ci-deployers` group, granting ESO the permissions it needs without manual kubectl steps.
 
 ## Questions Asked
 
 - 2026-03-20: Authenticate to AWS using OIDC, how it works, and setup on GitHub + AWS.
 - 2026-03-20: Write the answer based on what this project already implements.
 - 2026-03-20: Where are the role name and permissions defined in this project?
+- 2026-03-23: What changed with least-privilege and multi-env separation?
 
 ## Q&A Log
 
@@ -51,19 +51,27 @@ A: OIDC lets GitHub Actions exchange a short-lived identity token for temporary 
 
 ### Q: Please write answer based on what this project already implement
 
-A: In this project, OIDC auth is already implemented end-to-end. On GitHub side, the deploy job in `.github/workflows/ci-cd.yml` grants `id-token: write` and uses `aws-actions/configure-aws-credentials@v4` with `role-to-assume: ${{ secrets.AWS_ROLE_ARN }}` and `aws-region: ${{ secrets.AWS_REGION }}`. Deployment only runs on push to `main` or manual dispatch (`workflow_dispatch`). On AWS side, Terraform in `infra/terraform/iam.tf` creates the GitHub OIDC provider (`https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`), creates role `github-actions-eks`, and sets trust conditions for `aud == sts.amazonaws.com` plus `sub` matching `repo:${var.github_repo}:*`. That means any workflow context in this repository can assume the role, while deploy execution is still gated by workflow logic to main/manual runs. The role then gets permissions for ECR image push/pull, `eks:DescribeCluster`, and EKS cluster access via access entry + admin policy association so `kubectl apply` can deploy to the cluster.
+A: In this project, OIDC auth is implemented end-to-end with separate roles per environment. On GitHub side, `deploy-uat.yml` uses `role-to-assume: ${{ secrets.UAT_AWS_ROLE_ARN }}` and `deploy-prod.yml` uses `role-to-assume: ${{ secrets.PROD_AWS_ROLE_ARN }}`. Both grant `id-token: write`. `ci.yml` (which runs on `main` and PRs) does not authenticate to AWS at all — no deployment happens there. On AWS side, Terraform in `infra/terraform/uat/iam.tf` and `infra/terraform/prod/iam.tf` each create their own GitHub OIDC provider and role. The trust policy matches `repo:${var.github_repo}:*` while workflow-level conditions (separate branch triggers) prevent cross-environment deployment. Each role uses `AmazonEKSEditPolicy` scoped to the `default` namespace — not cluster-admin — giving CI only the permissions it needs to apply manifests. ESO RBAC (ClusterRole + binding for `ci-deployers`) is also managed by Terraform in `iam.tf`.
 
 - Confidence: high
-- Reasoning: The answer is derived directly from existing repo code: `.github/workflows/ci-cd.yml`, `infra/terraform/iam.tf`, and `infra/terraform/variables.tf`.
-- Related concepts: GitHub Actions permissions, OIDC provider, IAM role trust policy, Terraform, ECR, EKS access entries
+- Reasoning: Derived from `.github/workflows/deploy-uat.yml`, `.github/workflows/deploy-prod.yml`, and `infra/terraform/prod/iam.tf` / `infra/terraform/uat/iam.tf`.
+- Related concepts: GitHub Actions permissions, OIDC provider, IAM role trust policy, Terraform, ECR, EKS access entries, least privilege
 
-### Q: Where are the role name and permissions defined in this project?
+### Q: Where are the role names and permissions defined in this project?
 
-A: They are defined in `infra/terraform/iam.tf`. The role resource is `aws_iam_role.github_actions` with name `github-actions-eks`. Its permissions are attached in the same file: `aws_iam_role_policy_attachment.github_actions_ecr` (ECR push/pull policy), `aws_iam_policy.github_actions_eks_describe` + attachment (permission for `eks:DescribeCluster`), and EKS access resources (`aws_eks_access_entry.github_actions` and `aws_eks_access_policy_association.github_actions_admin`) that grant cluster access for deployment. In GitHub workflow, that role is consumed via `role-to-assume: ${{ secrets.AWS_ROLE_ARN }}` in `.github/workflows/ci-cd.yml`.
+A: They are defined separately in `infra/terraform/uat/iam.tf` and `infra/terraform/prod/iam.tf`. Each file creates: the GitHub OIDC provider, a CI role (e.g. `github-actions-uat`), ECR push/pull policy attachment, `eks:DescribeCluster` permission, and an EKS access entry with `AmazonEKSEditPolicy` scoped to the `default` namespace. It also creates a `ClusterRole` and `ClusterRoleBinding` for the `ci-deployers` group to support ESO RBAC. In the workflows, UAT uses `secrets.UAT_AWS_ROLE_ARN` and prod uses `secrets.PROD_AWS_ROLE_ARN`.
 
 - Confidence: high
-- Reasoning: The role definition and policy attachments are explicitly declared in Terraform, and the workflow references the role ARN secret directly.
-- Related concepts: IAM role, policy attachment, EKS access entry, role-to-assume
+- Reasoning: Role definitions are in per-environment Terraform files; workflow references are in `deploy-uat.yml` and `deploy-prod.yml`.
+- Related concepts: IAM role, policy attachment, EKS access entry, AmazonEKSEditPolicy, ESO RBAC, least privilege
+
+### Q: What changed with least-privilege and multi-env separation?
+
+A: Phase 4 introduced environment separation. Previously there was one `github-actions-eks` role with EKS cluster admin access used for all deployments. Now there are two roles (`github-actions-uat`, `github-actions-prod`), each scoped to their own cluster and namespace. The EKS access policy was downgraded from cluster admin to `AmazonEKSEditPolicy` restricted to the `default` namespace — CI can manage workloads there but cannot touch cluster-level resources. ESO RBAC was also moved from manual kubectl to Terraform-managed `ClusterRole` + `ClusterRoleBinding` for the `ci-deployers` group.
+
+- Confidence: high
+- Reasoning: Derived from git history (commits `a48dd19`, `3a42158`, `9a86e0f`) and current Terraform files.
+- Related concepts: least privilege, AmazonEKSEditPolicy, namespace scoping, ESO RBAC, ClusterRole
 
 ## Key Concepts
 
@@ -98,12 +106,12 @@ A: They are defined in `infra/terraform/iam.tf`. The role resource is `aws_iam_r
 
 ## Open Questions / Next Questions
 
-- How should trust policy be designed for `main` + release tags while staying least-privilege?
-- Should deployment be restricted via GitHub Environments and environment-scoped `sub` claims?
 - What CloudTrail events should be monitored for OIDC role usage anomalies?
+- Should trust policies be tightened further to environment-specific `sub` claims (e.g. `repo:ORG/REPO:environment:uat`)?
 
 ## Revision History
 
 - 2026-03-20: Created and populated topic file with first OIDC AWS authentication Q&A entry.
 - 2026-03-20: Added project-implementation-based OIDC explanation from workflow and Terraform files.
 - 2026-03-20: Clarified where role name and permissions are defined; added direct Q&A for lookup.
+- 2026-03-23: Updated to reflect multi-environment separation (UAT/prod), least-privilege AmazonEKSEditPolicy, ESO RBAC via Terraform. Answered previously open questions about least-privilege and environment separation.

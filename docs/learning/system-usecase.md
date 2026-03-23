@@ -38,11 +38,32 @@ NX runs `nx affected` and finds... nothing. No application source code changed. 
 
 ### 4. Open a pull request
 
-**Scenario:** You're working on a feature. You push your branch and open a PR.
+**Scenario:** You're working on a feature. You push your branch and open a PR targeting `main`.
 
-The CI workflow (`.github/workflows/ci.yml`) triggers on `pull_request`. It runs `nx run-many -t lint test build typecheck` across all projects. If anything fails, the PR is blocked. If everything passes, the PR gets a green check. **Nothing is deployed.** The deploy workflow only triggers on pushes to `main`.
+The CI workflow (`.github/workflows/ci.yml`) triggers on `pull_request`. It runs `nx run-many -t lint test build typecheck` across all projects. If anything fails, the PR is blocked. If everything passes, the PR gets a green check. **Nothing is deployed.** The deploy workflows only trigger on pushes to the `uat` or `prod` branches.
 
-**Why this works:** The two workflows have separate `on:` triggers. `ci.yml` uses `on: [push, pull_request]` — it's a quality gate. `deploy.yml` uses `on: push: branches: [main]` — it's the deployment gate. PRs go through CI but not deploy. Only merging to `main` deploys.
+**Why this works:** Three workflows have separate `on:` triggers:
+- `ci.yml` triggers on pushes to `main` and all PRs — pure quality gate
+- `deploy-uat.yml` triggers on pushes to `uat` — build + deploy to UAT
+- `deploy-prod.yml` triggers on pushes to `prod` — promote UAT images to prod
+
+PRs go through CI but not deploy. You must explicitly merge to `uat` to trigger a UAT deploy.
+
+---
+
+### 4b. Promote from UAT to Prod
+
+**Scenario:** You've tested the latest changes in UAT and want to go to production.
+
+```bash
+git checkout prod
+git merge uat
+git push origin prod
+```
+
+GitHub Actions triggers `deploy-prod.yml`. Because `environment: production` is set on the job, it pauses immediately and waits for a required reviewer to approve in the GitHub Actions UI. After approval, the workflow reads `k8s/overlays/uat/kustomization.yaml`, copies the exact ECR image URIs and SHAs into `k8s/overlays/prod/kustomization.yaml`, and deploys. No Docker build runs — the same images that ran in UAT go to prod.
+
+**Why this works:** Prod deployment uses an approval gate for human sign-off, and image promotion (not rebuild) ensures the tested artifact is identical to what gets deployed. The UAT overlay committed on the `uat` branch is carried into the `prod` branch by the merge, so `deploy-prod.yml` can always find it.
 
 ---
 
@@ -104,32 +125,41 @@ kubectl scale deployment/api-express --replicas=1
 **Scenario:** You've cloned the repo on a new machine (or AWS account). Nothing exists in AWS yet.
 
 1. Install prerequisites: `terraform`, `kubectl`, AWS CLI, configured with your account.
-2. Copy `infra/terraform/terraform.tfvars.example` → `terraform.tfvars`, fill in region, cluster name, GitHub repo.
-3. Run:
+2. Provision UAT:
    ```
-   cd infra/terraform
-   terraform init
-   terraform apply
+   cd infra/terraform/uat
+   cp terraform.tfvars.example terraform.tfvars  # fill in github_repo
+   terraform init && terraform apply
    ```
-4. Terraform creates: VPC, EKS cluster, 2× EC2 worker nodes, 4 ECR repos, IAM/OIDC role for GitHub Actions, Nginx Ingress Controller.
-5. Terraform prints outputs: ECR registry URL, cluster name, kubeconfig command.
-6. Add the outputs as GitHub repository secrets (`AWS_ROLE_ARN`, `ECR_REGISTRY`, `EKS_CLUSTER_NAME`, `AWS_REGION`).
-7. Push to `main`. The deploy workflow runs and all 4 services go live.
+3. Provision prod:
+   ```
+   cd infra/terraform/prod
+   cp terraform.tfvars.example terraform.tfvars
+   terraform init && terraform apply
+   ```
+4. Each Terraform run creates: VPC, EKS cluster, 2× EC2 worker nodes, 4 ECR repos, IAM/OIDC role, Nginx Ingress, cluster-autoscaler, Metrics Server.
+5. Add outputs as GitHub Environment secrets (UAT env: `UAT_AWS_ROLE_ARN`, `UAT_ECR_REGISTRY`, `UAT_EKS_CLUSTER_NAME`; prod env: `PROD_AWS_ROLE_ARN`, `PROD_EKS_CLUSTER_NAME`). Add `AWS_REGION` as a repo-level secret.
+6. Add a required reviewer to the `production` GitHub Environment.
+7. Merge to `uat` → deploy-uat deploys all services to UAT.
+8. Merge `uat` → `prod` → approve in GitHub Actions UI → prod goes live.
 
-**Why this works:** Terraform declares the entire AWS environment as code. `terraform apply` on an empty account creates everything from scratch in the correct order (VPC before EKS, ECR before IAM, etc.), handling dependencies automatically.
+**Why this works:** Terraform declares each AWS environment as code. `terraform apply` creates everything in the correct dependency order. The branch strategy (main → uat → prod) enforces a safe promotion path.
 
 ---
 
 ### 9. Tear down completely
 
-**Scenario:** You're done for the week. The cluster costs ~$150/month — you don't want it running while you're not using it.
+**Scenario:** You're done for the week. Each cluster costs ~$150/month — you don't want them running while you're not using it.
 
 ```
-cd infra/terraform
+cd infra/terraform/uat
+terraform destroy
+
+cd infra/terraform/prod
 terraform destroy
 ```
 
-Terraform removes everything it created: EKS cluster, EC2 nodes, NLB, ECR repos, VPC, IAM roles. Nothing left billing.
+Terraform removes everything it created per environment: EKS cluster, EC2 nodes, NLB, ECR repos, VPC, IAM roles. Nothing left billing.
 
 **Why this works:** Terraform tracks every resource it created in a state file (`terraform.tfstate`). `terraform destroy` reads that state and deletes each resource in reverse dependency order. Don't try to delete resources manually through the AWS console — Terraform won't know about it and `destroy` will error or leave orphans.
 

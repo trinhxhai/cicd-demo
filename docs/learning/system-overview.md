@@ -46,96 +46,149 @@ Each layer has one job. The monorepo layer does not know about AWS. The pipeline
 
 ---
 
-## 2. The Deployment Flow — What Happens on `git push`
+## 2. Branch Strategy — Three Environments
 
-Every push to `main` triggers the deploy workflow (`.github/workflows/deploy.yml`). Here's the full story:
-
-### Step 1 — NX figures out what changed
+Code flows through three branches, each with its own environment:
 
 ```
-nx show projects --affected --base=origin/main~1 --head=HEAD
+main  ──► (CI only — lint, test, build, typecheck)
+  │
+  └─ merge to uat ──► deploy-uat: build Docker images → push to UAT ECR → deploy to UAT EKS
+                            │
+                            └─ merge to prod ──► deploy-prod: promote UAT image tags → deploy to Prod EKS
 ```
 
-NX compares the current commit against the previous one and outputs only the services that actually changed. This means if you only touched `api-express`, the other three services are skipped entirely — no rebuild, no redeploy. This matters because rebuilding all 4 Docker images on every push is slow and wasteful.
+| Branch | Workflow | What it does |
+|--------|----------|-------------|
+| `main` | `ci.yml` | Runs tests/lint/build on every push and PR — no deploy |
+| `uat` | `deploy-uat.yml` | Builds Docker images, scans with Trivy, deploys to UAT cluster |
+| `prod` | `deploy-prod.yml` | Promotes UAT image tags to prod overlay, deploys to Prod cluster (requires manual approval) |
 
-**Why NX for this?** NX understands the dependency graph of the monorepo. If a shared library changes, it knows which services depend on it and marks them all as affected.
+**Key principle: build once, deploy many.** Docker images are built once on `uat` and promoted to prod — the same image that was tested in UAT goes to prod, with no rebuild.
 
-### Step 2 — Tests run (affected only)
+---
 
-```
-nx affected --target=test --parallel=3
-```
+## 3. The UAT Deployment Flow — What Happens on `git push` to `uat`
 
-Only the affected services are tested. If tests fail, the workflow stops here — nothing is built or deployed.
+Every push to `uat` triggers `.github/workflows/deploy-uat.yml`. Here's the full story:
 
-### Step 3 — GitHub Actions authenticates to AWS (OIDC)
+### Step 1 — GitHub Actions authenticates to AWS (OIDC)
 
 ```yaml
 uses: aws-actions/configure-aws-credentials@v4
 with:
-  role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+  role-to-assume: ${{ secrets.UAT_AWS_ROLE_ARN }}
 ```
 
-GitHub Actions assumes an IAM role via OIDC federation. There are no long-lived AWS access keys stored in GitHub secrets — just a role ARN. AWS verifies the request came from this specific GitHub repo and branch before granting access.
+GitHub Actions assumes a UAT-specific IAM role via OIDC federation. There are no long-lived AWS access keys — just a role ARN. The role has least-privilege permissions: ECR push/pull and `AmazonEKSEditPolicy` scoped to the `default` namespace only.
 
-**Why OIDC?** Static access keys are a security risk — if they leak, anyone can use them. OIDC tokens are short-lived and scoped to the exact workflow. Terraform created the trust relationship in `infra/terraform/iam.tf`.
+**Why OIDC?** Static access keys are a security risk — if they leak, anyone can use them. OIDC tokens are short-lived and scoped to the exact workflow. Terraform created the trust relationship in `infra/terraform/uat/`.
 
-### Step 4 — Docker images built and pushed to ECR
+### Step 2 — NX figures out what changed
+
+```
+AFFECTED=$(npx nx show projects --affected --base=$LAST_DEPLOY_SHA --head=HEAD)
+```
+
+NX compares the current commit against the last successful UAT deploy. Only services whose source files changed are affected. If you only touched `api-express`, the other three services are skipped entirely — no rebuild, no redeploy.
+
+### Step 3 — Docker images built, pushed, and scanned
 
 For each affected service:
 ```
 docker build -t <ecr-registry>/<service>:<git-sha> -f apps/<service>/Dockerfile .
 docker push <ecr-registry>/<service>:<git-sha>
+trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed <image>
 ```
 
-Images are tagged with the git commit SHA (`$GITHUB_SHA`). This makes every image traceable — you can always tell exactly which commit produced it.
+Images are tagged with the git commit SHA. Trivy scans each image for known CVEs — if a critical unfixed vulnerability is found, the pipeline fails and the image is never deployed.
 
-**Why ECR?** It's the AWS-native registry, tightly integrated with EKS. IAM controls who can push and pull — no separate credentials needed once OIDC is configured.
-
-### Step 5 — Kustomize patches the image tag
+### Step 4 — Kustomize patches the UAT overlay
 
 ```
-kustomize edit set image api-express=<ecr-registry>/api-express:<git-sha>
+kustomize edit set image "api-express=$ECR_REGISTRY/api-express:$IMAGE_TAG"
 ```
 
-Kustomize updates `k8s/overlays/prod/kustomization.yaml` with the new image tag for each affected service. This file is then committed back to the repo (`[skip ci]` to avoid a loop). The overlay is the source of truth for what's currently deployed.
+Kustomize updates `k8s/overlays/uat/kustomization.yaml` with the new ECR image URI for each affected service. CI commits this file back to the `uat` branch (`[skip ci]`). The overlay is the source of truth for what's deployed to UAT.
 
-**Why Kustomize?** It lets `k8s/base/` hold the canonical manifests (shared across environments) while overlays patch only what differs (image tags, replica counts, resource limits). No templating engine needed — it's plain YAML with targeted patches.
-
-### Step 6 — Deploy to EKS
+### Step 5 — Deploy to UAT EKS
 
 ```
-kubectl apply -k k8s/overlays/prod
-```
-
-Kubernetes applies the updated manifests. For services with a new image tag, it performs a rolling update — new pods start, old pods drain, no downtime.
-
-### Step 7 — Wait for rollout
-
-```
+kubectl apply -k k8s/overlays/uat
 kubectl rollout status deployment/api-express --timeout=120s
 ```
 
-The workflow blocks until all deployments are healthy. If a pod fails to start (bad image, crash loop, etc.), this step times out and the workflow fails — surfacing the problem immediately.
+Kubernetes applies the updated manifests with a rolling update. The workflow blocks until all deployments are healthy.
 
-**Full flow summary:**
+**UAT flow summary:**
 ```
-git push → nx affected → tests → OIDC auth → docker build → ECR push
+git push → OIDC auth → nx affected → docker build → ECR push → Trivy scan
 → kustomize patch → git commit overlay → kubectl apply → rollout status
 ```
 
 ---
 
-## 3. The Infrastructure — What Terraform Owns
+## 4. The Prod Deployment Flow — Promoting from UAT
+
+Every push to `prod` triggers `.github/workflows/deploy-prod.yml`. Prod does **not** rebuild Docker images — it reads the exact image tags from the UAT overlay and applies them to prod.
+
+### Step 1 — Manual approval gate
+
+The workflow is configured with `environment: production` in GitHub Actions. A required reviewer must approve the deployment before it proceeds. This is the human checkpoint between UAT and prod.
+
+### Step 2 — Authenticate to prod AWS role
+
+```yaml
+role-to-assume: ${{ secrets.PROD_AWS_ROLE_ARN }}
+```
+
+A separate prod-specific IAM role with least-privilege permissions.
+
+### Step 3 — Promote UAT image tags
+
+```bash
+# Read each service's image from the UAT overlay
+NEW_TAG=$(yq eval ".images[] | select(.name == \"$svc\") | .newTag" k8s/overlays/uat/kustomization.yaml)
+kustomize edit set image "$svc=$NEW_NAME:$NEW_TAG"
+```
+
+The exact same images that passed UAT are patched into `k8s/overlays/prod/kustomization.yaml`. No Docker build happens.
+
+### Step 4 — Deploy to Prod EKS
+
+```
+kubectl apply -k k8s/overlays/prod
+kubectl rollout status deployment/... --timeout=120s
+```
+
+**Prod flow summary:**
+```
+PR merge to prod → approval gate → OIDC auth → read UAT image tags
+→ patch prod overlay → git commit overlay → kubectl apply → rollout status
+```
+
+---
+
+## 5. The Infrastructure — What Terraform Owns
 
 All AWS resources are declared in `infra/terraform/`. Terraform is the source of truth for cloud state — you do not click in the AWS console to create or change infrastructure.
+
+There are **two separate Terraform roots**, one per environment:
+
+```
+infra/terraform/
+  prod/    ← production cluster
+  uat/     ← UAT cluster
+```
+
+Each root follows the same file structure:
 
 | File | What it creates |
 |---|---|
 | `vpc.tf` | VPC, subnets (public + private), routing |
-| `eks.tf` | EKS cluster, managed node group (t3.medium × 2), Nginx Ingress via Helm |
+| `eks.tf` | EKS cluster, managed node group (t3.medium × 2), Nginx Ingress via Helm, cluster-autoscaler via Helm |
 | `ecr.tf` | 4 ECR repositories (one per service) |
-| `iam.tf` | OIDC provider, IAM role for GitHub Actions with ECR + EKS permissions |
+| `iam.tf` | OIDC provider, IAM role for GitHub Actions (least-privilege: ECR + AmazonEKSEditPolicy scoped to default namespace), ESO RBAC ClusterRole + binding |
 | `outputs.tf` | Prints ECR URLs, cluster name, kubeconfig command after apply |
 
 **The workflow for any infra change:**
@@ -152,44 +205,61 @@ Never skip `plan`. It shows you exactly what Terraform will create, modify, or d
 - `/api/express/*` → `api-express`
 - `/api/python/*` → `api-python`
 
+**Cluster Autoscaler** is also installed via Helm by Terraform. It watches for unschedulable Pods (node is full) and adds EC2 nodes, and removes underutilized nodes to save cost.
+
+**External Secrets Operator (ESO)** runs inside the cluster (installed separately) and syncs secrets from AWS Secrets Manager into Kubernetes Secrets. For example, `api-nest` reads its `SERVICE_SECRET` from Secrets Manager via ESO — no secrets are hardcoded in YAML or environment variables.
+
 ---
 
-## 4. Your Responsibilities as Maintainer
+## 6. Your Responsibilities as Maintainer
 
 ### Day-to-day
 
-- **Watch GitHub Actions** — the deploy workflow is the first signal something is wrong. A failed step tells you exactly where the problem is.
+- **Watch GitHub Actions** — the deploy workflows are the first signal something is wrong. A failed step tells you exactly where the problem is.
 - **Check rollout health** — if `kubectl rollout status` times out, investigate with `kubectl describe pod <name>` and `kubectl logs <name>`.
-- **Monitor costs** — the cluster runs ~$150/month when idle. Know this number and check it monthly.
+- **Monitor costs** — each cluster runs ~$150/month when idle. You have two clusters (UAT + prod). Know this number and check monthly.
+
+### Deployment promotion flow
+
+```
+1. Push to main → CI (tests/lint/build) must pass
+2. Merge main → uat → deploy-uat builds images, deploys to UAT
+3. Test in UAT
+4. Merge uat → prod → deploy-prod (approval required) promotes images to prod
+```
 
 ### When things change
 
 | Change needed | What you touch |
 |---|---|
-| Add a new service | New `apps/<svc>/`, Dockerfile, `project.json`, K8s manifests in `k8s/base/`, ECR repo in `ecr.tf`, entry in deploy workflow |
-| Change infra (node size, region, etc.) | Edit `.tf` files → `terraform plan` → `terraform apply` |
+| Add a new service | New `apps/<svc>/`, Dockerfile, `project.json`, K8s manifests in `k8s/base/`, ECR repo in both `infra/terraform/prod/ecr.tf` and `infra/terraform/uat/ecr.tf`, update deploy-uat.yml SERVICES array |
+| Change infra (node size, region, etc.) | Edit `.tf` files in `infra/terraform/prod/` or `infra/terraform/uat/` → `terraform plan` → `terraform apply` |
 | Change K8s config (env vars, replicas, resources) | Edit `k8s/base/<svc>/deployment.yaml` or overlay patch → push triggers deploy |
-| Rotate secrets | Update GitHub repo secrets (AWS_ROLE_ARN, ECR_REGISTRY, EKS_CLUSTER_NAME) |
-| Update a service | Just push code — the pipeline handles the rest |
+| Add/rotate application secrets | Update secret in AWS Secrets Manager — ESO syncs it automatically to the cluster |
+| Rotate CI credentials | CI uses OIDC (no static keys to rotate). Update trust policy or role ARN in GitHub secrets if needed. |
+| Update a service | Push to `main` → merge to `uat` — the pipeline handles the rest |
 
 ### Cost and safety
 
-The cluster costs money whether or not traffic is running. Resources that keep billing:
+Each cluster costs money whether or not traffic is running:
 
-| Resource | ~Monthly cost |
+| Resource | ~Monthly cost per cluster |
 |---|---|
 | EKS control plane | $73 |
 | 2× t3.medium EC2 nodes | $60 |
 | NLB | $18 |
 | ECR storage | ~$1 |
-| **Total** | **~$150** |
+| **Total per cluster** | **~$150** |
 
-**To tear everything down safely:**
+With UAT + prod both running: ~$300/month.
+
+**To tear down an environment safely:**
 ```
-terraform destroy   ← removes all AWS resources Terraform created
+cd infra/terraform/prod    # or /uat
+terraform destroy
 ```
 
-This removes the EKS cluster, NLB, ECR repos, IAM roles, and VPC. Do not run `eksctl delete cluster` or manually delete resources — Terraform needs to manage teardown to avoid orphaned resources that keep billing.
+This removes the EKS cluster, NLB, ECR repos, IAM roles, and VPC. Do not delete resources manually in the AWS console — Terraform won't know about it and future operations will error or leave orphans.
 
 ---
 
@@ -197,10 +267,9 @@ This removes the EKS cluster, NLB, ECR repos, IAM roles, and VPC. Do not run `ek
 
 | Topic | File |
 |---|---|
-| NX — affected, caching, targets | `docs/learning/nx.md` |
-| GitHub Actions — workflow anatomy | `docs/learning/github-actions.md` |
-| Terraform — how it works, state | `docs/learning/terraform.md` |
+| NX — affected, caching, targets | `docs/learning/monorepo-nx.md` |
 | EKS + Kubernetes concepts | `docs/learning/eks-kubernetes.md` |
-| Kustomize — base + overlays | `docs/learning/kustomize.md` |
-| Docker — multi-stage builds | `docs/learning/docker.md` |
-| Autoscaling (Phase 3) | `docs/learning/autoscaling.md` |
+| How K8s is set up in this project | `docs/learning/project-k8s-setup.md` |
+| CI/CD security (OIDC, least privilege) | `docs/learning/cicd-security.md` |
+| Full setup from zero | `docs/learning/set-up-from-zero.md` |
+| Phase 2 anti-patterns and gaps | `docs/learning/phase-2-report.md` |
