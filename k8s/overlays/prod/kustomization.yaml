@@ -16,7 +16,7 @@ patches:
 images:
 - name: api-express
   newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-express
-  newTag: 24407c494beb255bbebcc9a44fe4c50661f3c776
+  newTag: 21c93530ff51bec68cc370699b68e184a67cf229
 - name: api-nest
   newName: 514453840552.dkr.ecr.us-east-1.amazonaws.com/api-nest
   newTag: 24407c494beb255bbebcc9a44fe4c50661f3c776
